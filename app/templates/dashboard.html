@@ -316,6 +316,9 @@ const BUCKET_LABELS = {
 const STATUS_LABELS = { "allowed": "Erlaubt", "denied": "Blockiert" };
 const UNKNOWN_HOST = "(unbekannt)";
 const UNKNOWN_COUNTRY = "??";
+const INTERNAL_COUNTRY = "LAN";
+const UNKNOWN_CITY = "(unbekannt)";
+const INTERNAL_CITY = "Internes Netzwerk (LAN)";
 
 function escapeHtml(value){
   if(value === null || value === undefined) return "";
@@ -326,6 +329,21 @@ function flagEmoji(code){
   if(!code || code.length !== 2) return "🏳️";
   const A = 0x1F1E6;
   return String.fromCodePoint(A + (code.toUpperCase().charCodeAt(0)-65), A + (code.toUpperCase().charCodeAt(1)-65));
+}
+
+// Zentrale Darstellung fuer Land-Werte: unterscheidet "echt unbekannt" (GeoIP-Ausfall
+// bei oeffentlicher IP) von "intern" (private LAN-IP, fuer die es gar kein Land gibt),
+// statt beides gleich als kaputte Flagge + "??" anzuzeigen.
+function countryLabel(code){
+  if(code === INTERNAL_COUNTRY) return "🏠 Internes Netz (LAN)";
+  if(code === UNKNOWN_COUNTRY || !code) return "❓ Unbekannt";
+  return `${flagEmoji(code)} ${code}`;
+}
+
+function cityLabel(cityName, countryCode){
+  if(cityName === INTERNAL_CITY) return `🏠 ${INTERNAL_CITY}`;
+  if(cityName === UNKNOWN_CITY || !cityName) return UNKNOWN_CITY;
+  return `${cityName} (${countryCode})`;
 }
 
 function setFilter(key, value){
@@ -354,7 +372,7 @@ function chipHtml(key, label, displayValue){
 function renderFilterChips(){
   const el = document.getElementById("active-filters");
   const chips = [];
-  if(filters.country) chips.push(chipHtml("country", "Land", filters.country === UNKNOWN_COUNTRY ? UNKNOWN_COUNTRY : `${flagEmoji(filters.country)} ${filters.country}`));
+  if(filters.country) chips.push(chipHtml("country", "Land", countryLabel(filters.country)));
   if(filters.host) chips.push(chipHtml("host", "Host", filters.host));
   if(filters.ip) chips.push(chipHtml("ip", "IP", filters.ip));
   if(filters.status) chips.push(chipHtml("status", "Status", STATUS_LABELS[filters.status] || filters.status));
@@ -538,7 +556,7 @@ document.getElementById("anomalies").addEventListener("click", (ev) => {
 function updateWorldMap(countries){
   countryCounts = {};
   countries.forEach(r => {
-    if(r.country_code && r.country_code !== UNKNOWN_COUNTRY){
+    if(r.country_code && r.country_code !== UNKNOWN_COUNTRY && r.country_code !== INTERNAL_COUNTRY){
       countryCounts[r.country_code.toUpperCase()] = r.c;
     }
   });
@@ -560,7 +578,7 @@ function updateMapSelection(){
   if(!worldMap) return;
   try{
     worldMap.clearSelectedRegions();
-    if(filters.country && filters.country !== UNKNOWN_COUNTRY){
+    if(filters.country && filters.country !== UNKNOWN_COUNTRY && filters.country !== INTERNAL_COUNTRY){
       worldMap._setSelected("regions", [filters.country.toUpperCase()]);
     }
   }catch(e){
@@ -577,7 +595,7 @@ async function loadStats(){
   document.getElementById("kpi-denied").textContent = data.denied.toLocaleString("de-CH");
   const topCountry = data.countries[0];
   document.getElementById("kpi-top-country").textContent = topCountry
-    ? `${flagEmoji(topCountry.country_code)} ${topCountry.country_code}` : "–";
+    ? countryLabel(topCountry.country_code) : "–";
   document.getElementById("kpi-traffic").textContent =
     formatBytes((data.traffic_total.bytes_upload || 0) + (data.traffic_total.bytes_download || 0));
 
@@ -625,7 +643,7 @@ async function loadStats(){
   charts.countries = new Chart(document.getElementById("chart-countries"), {
     type: "bar",
     data: {
-      labels: data.countries.map(r => `${flagEmoji(r.country_code)} ${r.country_code}`),
+      labels: data.countries.map(r => countryLabel(r.country_code)),
       datasets: [{ label:"Requests", data: data.countries.map(r=>r.c), backgroundColor:"#f2b84b" }]
     },
     options: baseOptions({ indexAxis:"y", plugins:{legend:{display:false}}, onClick: (evt, elements) => {
@@ -756,7 +774,7 @@ async function loadStats(){
   renderBarOrEmpty("chart-cities", "cities", data.top_cities, () => ({
     type: "bar",
     data: {
-      labels: data.top_cities.map(r => `${r.city_name} (${r.country_code})`),
+      labels: data.top_cities.map(r => cityLabel(r.city_name, r.country_code)),
       datasets: [{ label:"Requests", data: data.top_cities.map(r=>r.c), backgroundColor:"#f2b84b" }]
     },
     options: baseOptions({ indexAxis:"y", plugins:{legend:{display:false}}, onClick: (evt, elements) => {
@@ -801,7 +819,7 @@ async function loadEvents(){
       : `<span class="badge">${escapeHtml(e.protocol || "")}</span>`;
     const hostCell = e.host ? `<span class="clickable" data-filter-key="host" data-filter-value="${escapeHtml(e.host)}">${escapeHtml(e.host)}</span>` : "";
     const ipCell = e.source_ip ? `<span class="clickable" data-filter-key="ip" data-filter-value="${escapeHtml(e.source_ip)}">${escapeHtml(e.source_ip)}</span>` : "";
-    const countryCell = e.country_code ? `<span class="clickable" data-filter-key="country" data-filter-value="${escapeHtml(e.country_code)}">${flagEmoji(e.country_code)} ${escapeHtml(e.country_code)}</span>` : "";
+    const countryCell = e.country_code ? `<span class="clickable" data-filter-key="country" data-filter-value="${escapeHtml(e.country_code)}">${countryLabel(e.country_code)}</span>` : "";
     return `<tr>
       <td>${escapeHtml(fmtTime(e.timestamp))}</td>
       <td>${escapeHtml(e.method || (e.protocol||"").toUpperCase())}</td>

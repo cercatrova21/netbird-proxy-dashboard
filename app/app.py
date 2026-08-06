@@ -1,3 +1,4 @@
+import ipaddress
 import os
 import sqlite3
 import threading
@@ -338,6 +339,48 @@ UNKNOWN_HOST_LABEL = "(unbekannt)"
 UNKNOWN_COUNTRY_LABEL = "??"
 UNKNOWN_CITY_LABEL = "(unbekannt)"
 
+# NetBird liefert fuer Requests von privaten LAN-IPs (192.168.x, 10.x, ...) kein
+# GeoIP country_code/city_name, weil sich private Adressen nicht geolokalisieren
+# lassen. Ohne Sonderbehandlung landen diese Events in denselben "unbekannt"-Buckets
+# wie echte GeoIP-Ausfaelle bei oeffentlichen IPs - das macht die beiden Faelle im
+# Dashboard ununterscheidbar. Eigene Labels, damit klar ist: das ist internes LAN.
+INTERNAL_COUNTRY_LABEL = "LAN"
+INTERNAL_CITY_LABEL = "Internes Netzwerk (LAN)"
+
+# SQL-Gegenstueck zu is_private_ip() - deckt RFC1918 (10/8, 172.16/12, 192.168/16),
+# Loopback und Link-Local ab, damit Klicks auf einen "LAN"/"unbekannt"-Balken serverseitig
+# dieselbe Menge an Events treffen wie die Python-seitige Zuordnung unten.
+_PRIVATE_IP_SQL = (
+    "(source_ip LIKE '10.%' OR source_ip LIKE '192.168.%' OR "
+    + " OR ".join(f"source_ip LIKE '172.{i}.%'" for i in range(16, 32))
+    + " OR source_ip LIKE '127.%' OR source_ip LIKE '169.254.%'"
+    " OR source_ip = '::1' OR source_ip LIKE 'fe80:%'"
+    " OR source_ip LIKE 'fc%' OR source_ip LIKE 'fd%')"
+)
+
+
+def is_private_ip(ip):
+    """True fuer RFC1918/Loopback/Link-Local-Adressen. Muss mit _PRIVATE_IP_SQL
+    in Sync bleiben, da beide dieselben Events als "intern" markieren sollen."""
+    if not ip:
+        return False
+    try:
+        return ipaddress.ip_address(ip).is_private
+    except ValueError:
+        return False
+
+
+def label_country(raw_country, source_ip):
+    if raw_country:
+        return raw_country
+    return INTERNAL_COUNTRY_LABEL if is_private_ip(source_ip) else UNKNOWN_COUNTRY_LABEL
+
+
+def label_city(raw_city, source_ip):
+    if raw_city:
+        return raw_city
+    return INTERNAL_CITY_LABEL if is_private_ip(source_ip) else UNKNOWN_CITY_LABEL
+
 
 def apply_common_filters(args, where_clauses, params):
     """Cross-filter conditions shared by /api/stats and /api/events.
@@ -362,8 +405,10 @@ def apply_common_filters(args, where_clauses, params):
             where_clauses.append("host = ?")
             params.append(host)
     if country:
-        if country == UNKNOWN_COUNTRY_LABEL:
-            where_clauses.append("(country_code IS NULL OR country_code = '')")
+        if country == INTERNAL_COUNTRY_LABEL:
+            where_clauses.append(f"((country_code IS NULL OR country_code = '') AND {_PRIVATE_IP_SQL})")
+        elif country == UNKNOWN_COUNTRY_LABEL:
+            where_clauses.append(f"((country_code IS NULL OR country_code = '') AND NOT {_PRIVATE_IP_SQL})")
         else:
             where_clauses.append("country_code = ?")
             params.append(country)
@@ -386,8 +431,10 @@ def apply_common_filters(args, where_clauses, params):
         where_clauses.append("user_id = ?")
         params.append(user_id)
     if city:
-        if city == UNKNOWN_CITY_LABEL:
-            where_clauses.append("(city_name IS NULL OR city_name = '')")
+        if city == INTERNAL_CITY_LABEL:
+            where_clauses.append(f"((city_name IS NULL OR city_name = '') AND {_PRIVATE_IP_SQL})")
+        elif city == UNKNOWN_CITY_LABEL:
+            where_clauses.append(f"((city_name IS NULL OR city_name = '') AND NOT {_PRIVATE_IP_SQL})")
         else:
             where_clauses.append("city_name = ?")
             params.append(city)
@@ -459,9 +506,9 @@ def _compute_stats(args):
     for (raw_country, raw_host, path, raw_city, source_ip, duration_ms,
          bytes_upload, bytes_download, reason, user_id, auth_method_used,
          status_code, timestamp) in rows:
-        country_code = raw_country or UNKNOWN_COUNTRY_LABEL
+        country_code = label_country(raw_country, source_ip)
         host = raw_host or UNKNOWN_HOST_LABEL
-        city = raw_city or UNKNOWN_CITY_LABEL
+        city = label_city(raw_city, source_ip)
         bucket = timestamp[:13] + ":00:00Z"
 
         countries[country_code] += 1
@@ -616,7 +663,14 @@ def api_events():
     ).fetchall()
     conn.close()
 
-    return jsonify(events=[dict(r) for r in rows])
+    events = []
+    for r in rows:
+        e = dict(r)
+        e["country_code"] = label_country(e["country_code"], e["source_ip"])
+        e["city_name"] = label_city(e["city_name"], e["source_ip"])
+        events.append(e)
+
+    return jsonify(events=events)
 
 
 @app.route("/api/poller-status")
