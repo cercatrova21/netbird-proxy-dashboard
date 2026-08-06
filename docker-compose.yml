@@ -1,0 +1,39 @@
+services:
+  netbird-proxy-dashboard:
+    build: .
+    image: netbird-proxy-dashboard:latest
+    container_name: netbird-proxy-dashboard
+    restart: unless-stopped
+    environment:
+      NB_API_BASE: ${NB_API_BASE}
+      NB_API_TOKEN: ${NB_API_TOKEN}
+      POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-30}
+      INITIAL_BACKFILL_DAYS: ${INITIAL_BACKFILL_DAYS:-7}
+      RETENTION_DAYS: ${RETENTION_DAYS:-0}
+      ANOMALY_DENY_THRESHOLD: ${ANOMALY_DENY_THRESHOLD:-10}
+      STATS_CACHE_SECONDS: ${STATS_CACHE_SECONDS:-20}
+      TZ: ${TZ:-Europe/Zurich}
+    volumes:
+      - ./data:/data
+    ports:
+      # Binds the port ONLY to the given interface IP (e.g. your NetBird/WireGuard
+      # mesh IP), so the dashboard is reachable exclusively over that network
+      # and doesn't need its own authentication in front of it. Find your
+      # NetBird IP with:
+      #   netbird status
+      # or
+      #   ip a show wt0
+      - "${DASHBOARD_BIND_IP}:${DASHBOARD_PORT:-8098}:8098"
+
+    # If your NetBird management server runs in the same Compose project / the
+    # same Docker network, you can point NB_API_BASE directly at the container
+    # name (e.g. http://management:80) instead of going through the public
+    # domain + reverse proxy. To do that, attach the external network below
+    # and adjust the name to match your actual network/service name:
+    #
+    # networks:
+    #   - netbird_default
+    #
+# networks:
+#   netbird_default:
+#     external: true

@@ -1,0 +1,897 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NetBird Proxy Access · Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/jsvectormap@1.5.3/dist/css/jsvectormap.min.css">
+<script src="https://cdn.jsdelivr.net/npm/jsvectormap@1.5.3/dist/js/jsvectormap.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsvectormap@1.5.3/dist/maps/world.js"></script>
+<style>
+  :root{
+    --bg: #0d1117;
+    --panel: #141b24;
+    --panel-2: #0f151d;
+    --border: #223041;
+    --text: #dbe4ee;
+    --muted: #7d8ba0;
+    --accent-ok: #3ddc97;
+    --accent-deny: #ff6b5e;
+    --accent-info: #5b9dff;
+    --accent-amber: #f2b84b;
+    --mono: "JetBrains Mono", "SFMono-Regular", Consolas, Menlo, monospace;
+    --sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  *{ box-sizing: border-box; }
+  body{
+    margin:0; background: var(--bg); color: var(--text);
+    font-family: var(--sans); font-size: 14px;
+  }
+  header.top{
+    display:flex; align-items:center; justify-content:space-between;
+    padding: 14px 22px; border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, #121924, #0d1117);
+  }
+  .brand{ display:flex; align-items:center; gap:10px; }
+  .brand .dot{ width:9px; height:9px; border-radius:50%; background: var(--accent-ok); box-shadow: 0 0 8px var(--accent-ok); }
+  .brand h1{ font-size:15px; margin:0; letter-spacing:.02em; font-weight:600; }
+  .brand span.sub{ color: var(--muted); font-family: var(--mono); font-size:12px; }
+
+  main{ padding: 20px; max-width: 1320px; margin: 0 auto; }
+
+  #map{ width:100%; height:400px; }
+  .jvm-tooltip{ background: var(--panel); border:1px solid var(--border); color: var(--text); font-family: var(--mono); font-size:12px; }
+  .jvm-zoom-btn{ background: var(--panel); color: var(--text); border:1px solid var(--border); }
+
+  .toolbar{ display:flex; align-items:center; justify-content:space-between; margin-bottom: 16px; flex-wrap: wrap; gap:10px;}
+  .range-select{ display:flex; gap:6px; }
+  .range-select button{
+    background: var(--panel); border:1px solid var(--border); color: var(--muted);
+    padding: 6px 12px; border-radius: 6px; font-family: var(--mono); font-size:12px; cursor:pointer;
+  }
+  .range-select button.active{ color: var(--bg); background: var(--accent-info); border-color: var(--accent-info); font-weight:600; }
+  #last-update{ color: var(--muted); font-family: var(--mono); font-size:12px; }
+
+  .kpis{ display:grid; grid-template-columns: repeat(auto-fit, minmax(190px,1fr)); gap:14px; margin-bottom:18px; }
+  .kpi{ background: var(--panel); border:1px solid var(--border); border-radius:10px; padding:14px 16px; }
+  .kpi .label{ color: var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; }
+  .kpi .value{ font-family: var(--mono); font-size:26px; margin-top:6px; font-weight:600;}
+  .kpi.deny .value{ color: var(--accent-deny); }
+  .kpi.ok .value{ color: var(--accent-ok); }
+  .kpi.info .value{ color: var(--accent-info); }
+
+  .grid{ display:grid; grid-template-columns: 2fr 1fr; gap:14px; margin-bottom:14px; }
+  .grid2{ display:grid; grid-template-columns: 1fr 1fr; gap:14px; margin-bottom:14px; }
+  @media (max-width: 900px){ .grid, .grid2 { grid-template-columns: 1fr; } }
+
+  .card{ background: var(--panel); border:1px solid var(--border); border-radius:10px; padding:16px; }
+  .card h2{ font-size:12px; text-transform:uppercase; letter-spacing:.08em; color: var(--muted); margin:0 0 12px 0; font-weight:600; }
+  .card canvas{ max-height: 260px; }
+
+  table{ width:100%; border-collapse: collapse; font-family: var(--mono); font-size:12px; }
+  th{ text-align:left; color: var(--muted); font-weight:600; padding:6px 8px; border-bottom:1px solid var(--border); position: sticky; top:0; background: var(--panel); }
+  td{ padding:6px 8px; border-bottom:1px solid #1b2532; vertical-align: top; }
+  tr:hover td{ background: #101822; }
+  .badge{ padding:1px 6px; border-radius:4px; font-size:11px; }
+  .badge.ok{ background: rgba(61,220,151,.12); color: var(--accent-ok); }
+  .badge.deny{ background: rgba(255,107,94,.12); color: var(--accent-deny); }
+  .badge.warn{ background: rgba(242,184,75,.12); color: var(--accent-amber); }
+
+  .filters{ display:flex; gap:8px; margin-bottom:10px; flex-wrap:wrap; }
+  .filters input, .filters select{
+    background: var(--panel-2); border:1px solid var(--border); color: var(--text);
+    padding:6px 10px; border-radius:6px; font-family: var(--mono); font-size:12px;
+  }
+  .table-wrap{ max-height: 480px; overflow:auto; }
+  .flag{ margin-right:6px; }
+  footer{ text-align:center; color: var(--muted); font-family: var(--mono); font-size:11px; padding: 24px; }
+
+  #active-filters{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  #active-filters:empty{ display:none; }
+  .chip{
+    display:inline-flex; align-items:center; gap:6px;
+    background: rgba(91,157,255,.12); border:1px solid var(--accent-info); color: var(--accent-info);
+    padding: 4px 6px 4px 10px; border-radius: 999px; font-family: var(--mono); font-size:11px;
+  }
+  .chip b{ font-weight:600; color: var(--text); }
+  .chip button{
+    background:none; border:none; color: var(--accent-info); cursor:pointer; font-size:13px;
+    line-height:1; padding:2px 4px; border-radius:50%;
+  }
+  .chip button:hover{ background: rgba(91,157,255,.25); }
+  .chip.clear-all{ background: rgba(255,107,94,.1); border-color: var(--accent-deny); color: var(--accent-deny); cursor:pointer; }
+  .chip.clear-all:hover{ background: rgba(255,107,94,.2); }
+
+  .clickable{ cursor:pointer; border-bottom: 1px dotted var(--muted); }
+  .clickable:hover{ color: var(--accent-info); border-bottom-color: var(--accent-info); }
+  .card canvas{ cursor:pointer; }
+
+  #poller-status{ display:inline-flex; align-items:center; gap:6px; margin-right:14px; }
+  #poller-status .dot{ width:7px; height:7px; border-radius:50%; background: var(--accent-ok); }
+  #poller-status.stale .dot{ background: var(--accent-amber); }
+  #poller-status.dead .dot{ background: var(--accent-deny); }
+
+  #anomaly-toggle{
+    display:none; align-items:center; gap:6px; background: rgba(242,184,75,.1);
+    border:1px solid var(--accent-amber); color: var(--accent-amber);
+    padding: 6px 12px; border-radius: 6px; font-family: var(--mono); font-size:12px;
+    cursor:pointer;
+  }
+  #anomaly-toggle:hover{ background: rgba(242,184,75,.18); }
+  #anomaly-toggle .chevron{ transition: transform .15s ease; }
+  #anomaly-toggle.open .chevron{ transform: rotate(180deg); }
+  #anomalies{ margin: 0 0 16px 0; display:none; flex-direction:column; gap:8px; }
+  #anomalies.open{ display:flex; }
+  .anomaly{
+    display:flex; align-items:center; gap:10px; padding:8px 12px; border-radius:8px;
+    font-family: var(--mono); font-size:12px; border:1px solid var(--border);
+    background: rgba(242,184,75,.08); border-color: rgba(242,184,75,.4); color: var(--text);
+  }
+  .anomaly.critical{ background: rgba(255,107,94,.08); border-color: rgba(255,107,94,.4); }
+  .anomaly .tag{
+    flex-shrink:0; font-size:10px; text-transform:uppercase; letter-spacing:.05em;
+    color: var(--accent-amber); border:1px solid var(--accent-amber); border-radius:4px; padding:1px 6px;
+  }
+  .anomaly.critical .tag{ color: var(--accent-deny); border-color: var(--accent-deny); }
+  .anomaly button{
+    margin-left:auto; background:none; border:1px solid var(--border); color: var(--muted);
+    border-radius:6px; padding:3px 8px; font-family: var(--mono); font-size:11px; cursor:pointer;
+  }
+  .anomaly button:hover{ color: var(--text); border-color: var(--muted); }
+
+  .mini-kpis{ display:flex; gap:18px; margin-bottom:12px; }
+  .mini-kpi .label{ color: var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.07em; }
+  .mini-kpi .value{ font-family: var(--mono); font-size:18px; font-weight:600; }
+  .table-compact .table-wrap{ max-height: 260px; }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="brand">
+    <div class="dot"></div>
+    <div>
+      <h1>NetBird Reverse Proxy · Access Dashboard</h1>
+      <span class="sub">wer · was · woher</span>
+    </div>
+  </div>
+  <span id="poller-status" title="Poller-Status"><span class="dot"></span><span id="poller-status-text">–</span></span>
+  <span id="last-update">lade&hellip;</span>
+</header>
+
+<main>
+  <div class="toolbar">
+    <div class="range-select" id="range-select">
+      <button data-range="24h" class="active">24 Stunden</button>
+      <button data-range="7d">7 Tage</button>
+      <button data-range="30d">30 Tage</button>
+      <button data-range="all">Alles</button>
+    </div>
+    <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+      <button type="button" id="anomaly-toggle">
+        <span>⚠ <span id="anomaly-count">0</span> Anomalien</span><span class="chevron">▾</span>
+      </button>
+      <div id="active-filters"></div>
+    </div>
+  </div>
+
+  <div id="anomalies"></div>
+
+  <div class="kpis">
+    <div class="kpi info"><div class="label">Requests</div><div class="value" id="kpi-total">–</div></div>
+    <div class="kpi ok"><div class="label">Eindeutige Quell-IPs</div><div class="value" id="kpi-ips">–</div></div>
+    <div class="kpi deny"><div class="label">Blockiert / Denied</div><div class="value" id="kpi-denied">–</div></div>
+    <div class="kpi"><div class="label">Top Land</div><div class="value" id="kpi-top-country">–</div></div>
+    <div class="kpi"><div class="label">Traffic gesamt</div><div class="value" id="kpi-traffic">–</div></div>
+  </div>
+
+  <div class="card" style="margin-bottom:14px;">
+    <h2>Herkunft der Zugriffe</h2>
+    <div id="map"></div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Requests über Zeit</h2>
+      <canvas id="chart-timeseries"></canvas>
+    </div>
+    <div class="card">
+      <h2>Status-Verteilung</h2>
+      <canvas id="chart-status"></canvas>
+    </div>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <h2>Zugriffe nach Land</h2>
+      <canvas id="chart-countries"></canvas>
+    </div>
+    <div class="card">
+      <h2>Top Services / Hosts</h2>
+      <canvas id="chart-hosts"></canvas>
+    </div>
+  </div>
+
+  <div class="grid" style="margin-bottom:14px;">
+    <div class="card">
+      <h2>Latenz über Zeit (Ø pro Stunde)</h2>
+      <div class="mini-kpis">
+        <div class="mini-kpi"><div class="label">p50</div><div class="value" id="kpi-latency-p50">–</div></div>
+        <div class="mini-kpi"><div class="label">p95</div><div class="value" id="kpi-latency-p95">–</div></div>
+        <div class="mini-kpi"><div class="label">Ø</div><div class="value" id="kpi-latency-avg">–</div></div>
+      </div>
+      <canvas id="chart-latency"></canvas>
+    </div>
+    <div class="card table-compact">
+      <h2>Langsamste Requests</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Zeit</th><th>Host</th><th>Dauer</th></tr></thead>
+          <tbody id="slowest-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <h2>Traffic nach Host</h2>
+      <canvas id="chart-traffic"></canvas>
+    </div>
+    <div class="card">
+      <h2>Top Quell-IPs</h2>
+      <canvas id="chart-ips"></canvas>
+    </div>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <h2>Top User</h2>
+      <canvas id="chart-users"></canvas>
+    </div>
+    <div class="card">
+      <h2>Auth-Methoden</h2>
+      <canvas id="chart-auth"></canvas>
+    </div>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <h2>Top Pfade</h2>
+      <canvas id="chart-paths"></canvas>
+    </div>
+    <div class="card">
+      <h2>Top Städte</h2>
+      <canvas id="chart-cities"></canvas>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:14px;">
+    <h2>Deny-Gründe</h2>
+    <table>
+      <thead><tr><th>Grund</th><th style="width:120px;">Anzahl</th></tr></thead>
+      <tbody id="reasons-body"></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Letzte Zugriffe</h2>
+    <div class="filters">
+      <input id="f-search" placeholder="Suche: Host, Pfad, IP, User…" style="min-width:240px;">
+      <select id="f-status">
+        <option value="">alle</option>
+        <option value="allowed">nur erlaubt</option>
+        <option value="denied">nur blockiert</option>
+      </select>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Zeit</th><th>Methode</th><th>Host</th><th>Pfad</th><th>Status</th>
+            <th>Quell-IP</th><th>Land</th><th>User</th><th>Auth</th><th>Grund</th>
+          </tr>
+        </thead>
+        <tbody id="events-body"></tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<footer>NetBird Proxy Access Dashboard · Daten via /api/events/proxy · Lokale SQLite-Historie</footer>
+
+<script>
+let currentRange = "24h";
+let charts = {};
+
+// Cross-filter state: clicking a chart segment or table cell sets one of these,
+// which is then applied to every panel (KPIs, charts, table) simultaneously.
+let filters = { host: null, country: null, ip: null, status: null, bucket: null, reason: null, path: null, city: null, user_id: null };
+
+const BUCKET_LABELS = {
+  "2xx": "2xx Erfolgreich", "3xx": "3xx Weiterleitung", "4xx": "4xx Client-Fehler",
+  "5xx": "5xx Server-Fehler", "n/a": "n/a", "sonstige": "Sonstige"
+};
+const STATUS_LABELS = { "allowed": "Erlaubt", "denied": "Blockiert" };
+const UNKNOWN_HOST = "(unbekannt)";
+const UNKNOWN_COUNTRY = "??";
+
+function escapeHtml(value){
+  if(value === null || value === undefined) return "";
+  return String(value).replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[ch]));
+}
+
+function flagEmoji(code){
+  if(!code || code.length !== 2) return "🏳️";
+  const A = 0x1F1E6;
+  return String.fromCodePoint(A + (code.toUpperCase().charCodeAt(0)-65), A + (code.toUpperCase().charCodeAt(1)-65));
+}
+
+function setFilter(key, value){
+  filters[key] = (filters[key] === value) ? null : value;
+  if(key === "status"){ document.getElementById("f-status").value = filters.status || ""; }
+  renderFilterChips();
+  refreshAll();
+}
+
+function clearFilter(key){
+  if(key === "all"){
+    Object.keys(filters).forEach(k => filters[k] = null);
+    document.getElementById("f-status").value = "";
+  } else {
+    filters[key] = null;
+    if(key === "status"){ document.getElementById("f-status").value = ""; }
+  }
+  renderFilterChips();
+  refreshAll();
+}
+
+function chipHtml(key, label, displayValue){
+  return `<span class="chip" data-key="${key}"><span>${label}: <b>${displayValue}</b></span><button type="button" data-clear="${key}">✕</button></span>`;
+}
+
+function renderFilterChips(){
+  const el = document.getElementById("active-filters");
+  const chips = [];
+  if(filters.country) chips.push(chipHtml("country", "Land", filters.country === UNKNOWN_COUNTRY ? UNKNOWN_COUNTRY : `${flagEmoji(filters.country)} ${filters.country}`));
+  if(filters.host) chips.push(chipHtml("host", "Host", filters.host));
+  if(filters.ip) chips.push(chipHtml("ip", "IP", filters.ip));
+  if(filters.status) chips.push(chipHtml("status", "Status", STATUS_LABELS[filters.status] || filters.status));
+  if(filters.bucket) chips.push(chipHtml("bucket", "Code", BUCKET_LABELS[filters.bucket] || filters.bucket));
+  if(filters.reason) chips.push(chipHtml("reason", "Grund", filters.reason));
+  if(filters.path) chips.push(chipHtml("path", "Pfad", filters.path));
+  if(filters.city) chips.push(chipHtml("city", "Stadt", filters.city));
+  if(filters.user_id) chips.push(chipHtml("user_id", "User", filters.user_id));
+  if(chips.length > 1) chips.push(`<span class="chip clear-all" data-clear="all">Alle Filter zurücksetzen ✕</span>`);
+  el.innerHTML = chips.join("");
+}
+
+function buildParams(){
+  const params = new URLSearchParams({ range: currentRange });
+  if(filters.host) params.set("host", filters.host);
+  if(filters.country) params.set("country", filters.country);
+  if(filters.ip) params.set("ip", filters.ip);
+  if(filters.status) params.set("status", filters.status);
+  if(filters.bucket) params.set("bucket", filters.bucket);
+  if(filters.reason) params.set("reason", filters.reason);
+  if(filters.path) params.set("path", filters.path);
+  if(filters.city) params.set("city", filters.city);
+  if(filters.user_id) params.set("user_id", filters.user_id);
+  return params;
+}
+
+function formatBytes(bytes){
+  if(!bytes || bytes <= 0) return "0 B";
+  const units = ["B","KB","MB","GB","TB"];
+  const i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  return `${(bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+function formatMs(ms){
+  if(ms === null || ms === undefined) return "–";
+  if(ms >= 1000) return `${(ms/1000).toFixed(1)} s`;
+  return `${Math.round(ms)} ms`;
+}
+
+document.getElementById("active-filters").addEventListener("click", (ev) => {
+  const btn = ev.target.closest("[data-clear]");
+  if(!btn) return;
+  clearFilter(btn.dataset.clear);
+});
+
+function fmtTime(ts){
+  try{
+    const d = new Date(ts);
+    return d.toLocaleString("de-CH", {
+      timeZone: "Europe/Zurich",
+      day:"2-digit", month:"2-digit", year:"numeric",
+      hour:"2-digit", minute:"2-digit", second:"2-digit"
+    });
+  }catch(e){ return ts; }
+}
+
+function destroyChart(id){
+  if(charts[id]){ charts[id].destroy(); }
+}
+
+// Several new panels (Top User, Auth-Methoden, ...) are frequently empty in
+// practice (e.g. user_id is only set for authenticated requests) - fall back
+// to a text note instead of rendering a blank canvas.
+function renderBarOrEmpty(canvasId, chartKey, rows, buildConfig){
+  const canvas = document.getElementById(canvasId);
+  destroyChart(chartKey);
+  let empty = canvas.parentElement.querySelector(".empty-note");
+  if(!rows.length){
+    canvas.style.display = "none";
+    if(!empty){
+      empty = document.createElement("div");
+      empty.className = "empty-note";
+      empty.style.cssText = "color:var(--muted); font-family:var(--mono); font-size:12px; padding:40px 0; text-align:center;";
+      canvas.parentElement.appendChild(empty);
+    }
+    empty.textContent = "Keine Daten im gewählten Zeitraum";
+    empty.style.display = "block";
+    return;
+  }
+  canvas.style.display = "";
+  if(empty) empty.style.display = "none";
+  charts[chartKey] = new Chart(canvas, buildConfig());
+}
+
+function baseOptions(extra){
+  return Object.assign({
+    responsive:true, maintainAspectRatio:false,
+    plugins:{ legend:{ labels:{ color:"#7d8ba0", font:{family:"JetBrains Mono", size:11} } } },
+    scales:{
+      x:{ ticks:{ color:"#7d8ba0", font:{size:10} }, grid:{ color:"#1b2532" } },
+      y:{ ticks:{ color:"#7d8ba0", font:{size:10} }, grid:{ color:"#1b2532" } }
+    }
+  }, extra || {});
+}
+
+let worldMap = null;
+let countryCounts = {};
+
+function ensureWorldMap(){
+  if(worldMap || typeof jsVectorMap === "undefined") return;
+  try{
+    worldMap = new jsVectorMap({
+      selector: "#map",
+      map: "world",
+      zoomButtons: true,
+      zoomOnScroll: false,
+      backgroundColor: "transparent",
+      regionStyle: {
+        initial: { fill: "#1b2532", stroke: "#223041", strokeWidth: 0.5 },
+        hover: { fill: "#5b9dff", cursor: "pointer" },
+        // Nur der Rand wird ueberschrieben (kein fill), damit die Volumen-Einfaerbung
+        // des gefilterten Landes sichtbar bleibt - der Ring markiert nur den aktiven Filter.
+        selected: { stroke: "#f2b84b", strokeWidth: 2.5 },
+      },
+      series: {
+        regions: [{
+          values: countryCounts,
+          scale: ["#1b2532", "#5b9dff"],
+          normalizeFunction: "polynomial",
+        }],
+      },
+      onRegionTooltipShow(event, tooltip, code){
+        const n = countryCounts[code] || 0;
+        tooltip.text(`${tooltip.text()}: ${n.toLocaleString("de-CH")} Requests`, true);
+      },
+      onRegionClick(event, code){
+        setFilter("country", code);
+      },
+    });
+  }catch(e){
+    console.warn("Weltkarte konnte nicht initialisiert werden", e);
+  }
+}
+
+let anomaliesOpen = false;
+
+function setAnomaliesOpen(open){
+  anomaliesOpen = open;
+  document.getElementById("anomalies").classList.toggle("open", open);
+  document.getElementById("anomaly-toggle").classList.toggle("open", open);
+}
+
+document.getElementById("anomaly-toggle").addEventListener("click", () => {
+  setAnomaliesOpen(!anomaliesOpen);
+});
+
+function renderAnomalies(anomalies){
+  const toggle = document.getElementById("anomaly-toggle");
+  const count = anomalies ? anomalies.length : 0;
+  document.getElementById("anomaly-count").textContent = count;
+  toggle.style.display = count ? "inline-flex" : "none";
+  if(!count) setAnomaliesOpen(false);
+
+  const el = document.getElementById("anomalies");
+  if(!anomalies || !anomalies.length){ el.innerHTML = ""; return; }
+  el.innerHTML = anomalies.map(a => {
+    if(a.type === "new_country"){
+      return `<div class="anomaly">
+        <span class="tag">Neu</span>
+        <span>Erstmals gesehenes Land <b>${flagEmoji(a.country_code)} ${escapeHtml(a.country_code)}</b> · ${a.count.toLocaleString("de-CH")} Requests seit ${escapeHtml(fmtTime(a.first_seen))}</span>
+        <button type="button" data-filter-key="country" data-filter-value="${escapeHtml(a.country_code)}">Filtern</button>
+      </div>`;
+    }
+    if(a.type === "ip_deny_spike"){
+      return `<div class="anomaly critical">
+        <span class="tag">Denies</span>
+        <span><b>${escapeHtml(a.source_ip)}</b> wurde ${a.count.toLocaleString("de-CH")}× blockiert im gewählten Zeitraum</span>
+        <button type="button" data-filter-key="ip" data-filter-value="${escapeHtml(a.source_ip)}">Filtern</button>
+      </div>`;
+    }
+    return "";
+  }).join("");
+}
+
+document.getElementById("anomalies").addEventListener("click", (ev) => {
+  const el = ev.target.closest("[data-filter-key]");
+  if(!el) return;
+  setFilter(el.dataset.filterKey, el.dataset.filterValue);
+});
+
+function updateWorldMap(countries){
+  countryCounts = {};
+  countries.forEach(r => {
+    if(r.country_code && r.country_code !== UNKNOWN_COUNTRY){
+      countryCounts[r.country_code.toUpperCase()] = r.c;
+    }
+  });
+  ensureWorldMap();
+  if(!worldMap) return;
+  try{
+    worldMap.series.regions[0].setValues(countryCounts);
+  }catch(e){
+    console.warn("Kartenaktualisierung fehlgeschlagen", e);
+  }
+  updateMapSelection();
+}
+
+// Der aktive Länder-Filter (single-select, siehe `filters.country`) wird als
+// Ring auf der Karte markiert - eigene Methode statt der öffentlichen API,
+// da jsVectorMap 1.5.3 kein "setSelectedRegions" exponiert, nur den internen
+// this._setSelected()-Helper (siehe getSelectedRegions/clearSelectedRegions).
+function updateMapSelection(){
+  if(!worldMap) return;
+  try{
+    worldMap.clearSelectedRegions();
+    if(filters.country && filters.country !== UNKNOWN_COUNTRY){
+      worldMap._setSelected("regions", [filters.country.toUpperCase()]);
+    }
+  }catch(e){
+    console.warn("Kartenauswahl konnte nicht aktualisiert werden", e);
+  }
+}
+
+async function loadStats(){
+  const res = await fetch(`/api/stats?${buildParams().toString()}`);
+  const data = await res.json();
+
+  document.getElementById("kpi-total").textContent = data.total_requests.toLocaleString("de-CH");
+  document.getElementById("kpi-ips").textContent = data.unique_ips.toLocaleString("de-CH");
+  document.getElementById("kpi-denied").textContent = data.denied.toLocaleString("de-CH");
+  const topCountry = data.countries[0];
+  document.getElementById("kpi-top-country").textContent = topCountry
+    ? `${flagEmoji(topCountry.country_code)} ${topCountry.country_code}` : "–";
+  document.getElementById("kpi-traffic").textContent =
+    formatBytes((data.traffic_total.bytes_upload || 0) + (data.traffic_total.bytes_download || 0));
+
+  document.getElementById("kpi-latency-p50").textContent = formatMs(data.latency.p50);
+  document.getElementById("kpi-latency-p95").textContent = formatMs(data.latency.p95);
+  document.getElementById("kpi-latency-avg").textContent = formatMs(data.latency.avg);
+
+  renderAnomalies(data.anomalies);
+  updateWorldMap(data.countries);
+
+  // Timeseries
+  destroyChart("ts");
+  charts.ts = new Chart(document.getElementById("chart-timeseries"), {
+    type: "line",
+    data: {
+      labels: data.timeseries.map(r => r.bucket),
+      datasets: [{
+        label: "Requests/Stunde", data: data.timeseries.map(r => r.c),
+        borderColor: "#5b9dff", backgroundColor: "rgba(91,157,255,.12)",
+        fill:true, tension:.25, pointRadius:0, borderWidth:2
+      }]
+    },
+    options: baseOptions({ plugins:{legend:{display:false}} })
+  });
+
+  // Status buckets
+  const bucketColors = {"2xx":"#3ddc97","3xx":"#5b9dff","4xx":"#f2b84b","5xx":"#ff6b5e","n/a":"#7d8ba0","sonstige":"#7d8ba0"};
+  destroyChart("status");
+  charts.status = new Chart(document.getElementById("chart-status"), {
+    type: "doughnut",
+    data: {
+      labels: data.status_buckets.map(r=>r.bucket),
+      datasets: [{ data: data.status_buckets.map(r=>r.c),
+        backgroundColor: data.status_buckets.map(r=>bucketColors[r.bucket]||"#7d8ba0"),
+        borderColor: "#141b24", borderWidth: 2 }]
+    },
+    options: baseOptions({ scales:{}, onClick: (evt, elements) => {
+      if(!elements.length) return;
+      setFilter("bucket", data.status_buckets[elements[0].index].bucket);
+    } })
+  });
+
+  // Countries
+  destroyChart("countries");
+  charts.countries = new Chart(document.getElementById("chart-countries"), {
+    type: "bar",
+    data: {
+      labels: data.countries.map(r => `${flagEmoji(r.country_code)} ${r.country_code}`),
+      datasets: [{ label:"Requests", data: data.countries.map(r=>r.c), backgroundColor:"#f2b84b" }]
+    },
+    options: baseOptions({ indexAxis:"y", plugins:{legend:{display:false}}, onClick: (evt, elements) => {
+      if(!elements.length) return;
+      setFilter("country", data.countries[elements[0].index].country_code);
+    } })
+  });
+
+  // Hosts
+  destroyChart("hosts");
+  charts.hosts = new Chart(document.getElementById("chart-hosts"), {
+    type: "bar",
+    data: {
+      labels: data.hosts.map(r=>r.host),
+      datasets: [{ label:"Requests", data: data.hosts.map(r=>r.c), backgroundColor:"#5b9dff" }]
+    },
+    options: baseOptions({ indexAxis:"y", plugins:{legend:{display:false}}, onClick: (evt, elements) => {
+      if(!elements.length) return;
+      setFilter("host", data.hosts[elements[0].index].host);
+    } })
+  });
+
+  // Latenz über Zeit
+  destroyChart("latency");
+  charts.latency = new Chart(document.getElementById("chart-latency"), {
+    type: "line",
+    data: {
+      labels: data.latency_timeseries.map(r => r.bucket),
+      datasets: [{
+        label: "Ø Latenz", data: data.latency_timeseries.map(r => Math.round(r.avg_ms)),
+        borderColor: "#f2b84b", backgroundColor: "rgba(242,184,75,.12)",
+        fill:true, tension:.25, pointRadius:0, borderWidth:2
+      }]
+    },
+    options: baseOptions({ plugins:{legend:{display:false}} })
+  });
+
+  // Langsamste Requests
+  const slowestBody = document.getElementById("slowest-body");
+  slowestBody.innerHTML = data.slowest_events.length
+    ? data.slowest_events.map(r => `<tr>
+        <td>${escapeHtml(fmtTime(r.timestamp))}</td>
+        <td><span class="clickable" data-filter-key="host" data-filter-value="${escapeHtml(r.host)}">${escapeHtml(r.host || "")}</span></td>
+        <td>${formatMs(r.duration_ms)}</td>
+      </tr>`).join("")
+    : `<tr><td colspan="3" style="color:var(--muted)">Keine Daten im gewählten Zeitraum</td></tr>`;
+
+  // Traffic nach Host
+  renderBarOrEmpty("chart-traffic", "traffic", data.traffic_hosts, () => ({
+    type: "bar",
+    data: {
+      labels: data.traffic_hosts.map(r=>r.host),
+      datasets: [
+        { label:"Download", data: data.traffic_hosts.map(r=>r.bytes_download), backgroundColor:"#5b9dff" },
+        { label:"Upload", data: data.traffic_hosts.map(r=>r.bytes_upload), backgroundColor:"#f2b84b" }
+      ]
+    },
+    options: baseOptions({
+      indexAxis:"y",
+      scales:{
+        x:{ stacked:true, ticks:{ color:"#7d8ba0", font:{size:10}, callback: v => formatBytes(v) }, grid:{ color:"#1b2532" } },
+        y:{ stacked:true, ticks:{ color:"#7d8ba0", font:{size:10} }, grid:{ color:"#1b2532" } }
+      },
+      onClick: (evt, elements) => {
+        if(!elements.length) return;
+        setFilter("host", data.traffic_hosts[elements[0].index].host);
+      }
+    })
+  }));
+
+  // Top Quell-IPs
+  renderBarOrEmpty("chart-ips", "ips", data.top_ips, () => ({
+    type: "bar",
+    data: {
+      labels: data.top_ips.map(r=>r.source_ip),
+      datasets: [{ label:"Requests", data: data.top_ips.map(r=>r.c), backgroundColor:"#3ddc97" }]
+    },
+    options: baseOptions({ indexAxis:"y", plugins:{legend:{display:false}}, onClick: (evt, elements) => {
+      if(!elements.length) return;
+      setFilter("ip", data.top_ips[elements[0].index].source_ip);
+    } })
+  }));
+
+  // Top User
+  renderBarOrEmpty("chart-users", "users", data.top_users, () => ({
+    type: "bar",
+    data: {
+      labels: data.top_users.map(r=>r.user_id),
+      datasets: [{ label:"Requests", data: data.top_users.map(r=>r.c), backgroundColor:"#3ddc97" }]
+    },
+    options: baseOptions({ indexAxis:"y", plugins:{legend:{display:false}}, onClick: (evt, elements) => {
+      if(!elements.length) return;
+      setFilter("user_id", data.top_users[elements[0].index].user_id);
+    } })
+  }));
+
+  // Auth-Methoden
+  const authColors = ["#5b9dff","#3ddc97","#f2b84b","#ff6b5e","#7d8ba0"];
+  renderBarOrEmpty("chart-auth", "auth", data.auth_methods, () => ({
+    type: "doughnut",
+    data: {
+      labels: data.auth_methods.map(r=>r.auth_method_used),
+      datasets: [{ data: data.auth_methods.map(r=>r.c),
+        backgroundColor: data.auth_methods.map((r,i)=>authColors[i % authColors.length]),
+        borderColor: "#141b24", borderWidth: 2 }]
+    },
+    options: baseOptions({ scales:{} })
+  }));
+
+  // Top Pfade
+  renderBarOrEmpty("chart-paths", "paths", data.top_paths, () => ({
+    type: "bar",
+    data: {
+      labels: data.top_paths.map(r=>`${r.host}${r.path}`),
+      datasets: [{ label:"Requests", data: data.top_paths.map(r=>r.c), backgroundColor:"#5b9dff" }]
+    },
+    options: baseOptions({ indexAxis:"y", plugins:{legend:{display:false}}, onClick: (evt, elements) => {
+      if(!elements.length) return;
+      const item = data.top_paths[elements[0].index];
+      filters.host = item.host;
+      filters.path = item.path;
+      renderFilterChips();
+      refreshAll();
+    } })
+  }));
+
+  // Top Städte
+  renderBarOrEmpty("chart-cities", "cities", data.top_cities, () => ({
+    type: "bar",
+    data: {
+      labels: data.top_cities.map(r => `${r.city_name} (${r.country_code})`),
+      datasets: [{ label:"Requests", data: data.top_cities.map(r=>r.c), backgroundColor:"#f2b84b" }]
+    },
+    options: baseOptions({ indexAxis:"y", plugins:{legend:{display:false}}, onClick: (evt, elements) => {
+      if(!elements.length) return;
+      setFilter("city", data.top_cities[elements[0].index].city_name);
+    } })
+  }));
+
+  // Reasons table
+  const reasonsBody = document.getElementById("reasons-body");
+  reasonsBody.innerHTML = data.reasons.length
+    ? data.reasons.map(r => `<tr><td><span class="clickable" data-filter-key="reason" data-filter-value="${escapeHtml(r.reason)}">${escapeHtml(r.reason)}</span></td><td>${r.c}</td></tr>`).join("")
+    : `<tr><td colspan="2" style="color:var(--muted)">Keine Deny-Events im gewählten Zeitraum</td></tr>`;
+}
+
+document.getElementById("reasons-body").addEventListener("click", (ev) => {
+  const el = ev.target.closest("[data-filter-key]");
+  if(!el) return;
+  setFilter(el.dataset.filterKey, el.dataset.filterValue);
+});
+
+document.getElementById("slowest-body").addEventListener("click", (ev) => {
+  const el = ev.target.closest("[data-filter-key]");
+  if(!el) return;
+  setFilter(el.dataset.filterKey, el.dataset.filterValue);
+});
+
+async function loadEvents(){
+  const search = document.getElementById("f-search").value.trim();
+  const params = buildParams();
+  params.set("limit", "200");
+  if(search) params.set("search", search);
+
+  const res = await fetch(`/api/events?${params.toString()}`);
+  const data = await res.json();
+  const body = document.getElementById("events-body");
+
+  body.innerHTML = data.events.map(e => {
+    const denied = e.reason && e.reason.length > 0;
+    const statusBadge = e.status_code
+      ? `<span class="badge ${denied ? 'deny' : (e.status_code < 400 ? 'ok' : 'warn')}">${e.status_code}</span>`
+      : `<span class="badge">${escapeHtml(e.protocol || "")}</span>`;
+    const hostCell = e.host ? `<span class="clickable" data-filter-key="host" data-filter-value="${escapeHtml(e.host)}">${escapeHtml(e.host)}</span>` : "";
+    const ipCell = e.source_ip ? `<span class="clickable" data-filter-key="ip" data-filter-value="${escapeHtml(e.source_ip)}">${escapeHtml(e.source_ip)}</span>` : "";
+    const countryCell = e.country_code ? `<span class="clickable" data-filter-key="country" data-filter-value="${escapeHtml(e.country_code)}">${flagEmoji(e.country_code)} ${escapeHtml(e.country_code)}</span>` : "";
+    return `<tr>
+      <td>${escapeHtml(fmtTime(e.timestamp))}</td>
+      <td>${escapeHtml(e.method || (e.protocol||"").toUpperCase())}</td>
+      <td>${hostCell}</td>
+      <td>${escapeHtml(e.path || "")}</td>
+      <td>${statusBadge}</td>
+      <td>${ipCell}</td>
+      <td>${countryCell}</td>
+      <td>${escapeHtml(e.user_id || "")}</td>
+      <td>${escapeHtml(e.auth_method_used || "")}</td>
+      <td>${denied ? `<span class="badge deny">${escapeHtml(e.reason)}</span>` : ""}</td>
+    </tr>`;
+  }).join("") || `<tr><td colspan="10" style="color:var(--muted)">Keine Events gefunden</td></tr>`;
+}
+
+document.getElementById("events-body").addEventListener("click", (ev) => {
+  const el = ev.target.closest("[data-filter-key]");
+  if(!el) return;
+  setFilter(el.dataset.filterKey, el.dataset.filterValue);
+});
+
+function fmtLag(seconds){
+  if(seconds < 90) return `vor ${Math.round(seconds)}s`;
+  if(seconds < 3600) return `vor ${Math.round(seconds/60)}min`;
+  return `vor ${Math.round(seconds/3600)}h`;
+}
+
+async function loadPollerStatus(){
+  try{
+    const res = await fetch("/api/poller-status");
+    const data = await res.json();
+    const el = document.getElementById("poller-status");
+    const text = document.getElementById("poller-status-text");
+    if(!data.poller_configured){
+      el.className = "dead";
+      text.textContent = "Poller nicht konfiguriert";
+    } else if(data.lag_seconds === null){
+      el.className = "dead";
+      text.textContent = "noch keine Daten";
+    } else {
+      el.className = data.lag_seconds < 120 ? "" : (data.lag_seconds < 600 ? "stale" : "dead");
+      text.textContent = `Sync ${fmtLag(data.lag_seconds)}`;
+    }
+  }catch(e){
+    console.warn("Poller-Status konnte nicht geladen werden", e);
+  }
+}
+
+async function refreshAll(){
+  await Promise.all([loadStats(), loadEvents(), loadPollerStatus()]);
+  document.getElementById("last-update").textContent = "aktualisiert " + new Date().toLocaleTimeString("de-CH", {timeZone: "Europe/Zurich"});
+}
+
+document.querySelectorAll("#range-select button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll("#range-select button").forEach(b=>b.classList.remove("active"));
+    btn.classList.add("active");
+    currentRange = btn.dataset.range;
+    refreshAll();
+  });
+});
+document.getElementById("f-search").addEventListener("input", () => { clearTimeout(window._st); window._st = setTimeout(loadEvents, 300); });
+document.getElementById("f-status").addEventListener("change", (ev) => {
+  filters.status = ev.target.value || null;
+  renderFilterChips();
+  refreshAll();
+});
+
+// Auto-Refresh pausieren, solange der Tab nicht sichtbar ist (spart API-Last
+// bei vielen offenen, ungenutzten Tabs), sofort nachholen beim Zurückkehren.
+let refreshTimer = null;
+function startAutoRefresh(){
+  if(refreshTimer) return;
+  refreshTimer = setInterval(refreshAll, 30000);
+}
+function stopAutoRefresh(){
+  clearInterval(refreshTimer);
+  refreshTimer = null;
+}
+document.addEventListener("visibilitychange", () => {
+  if(document.hidden){
+    stopAutoRefresh();
+  } else {
+    refreshAll();
+    startAutoRefresh();
+  }
+});
+
+refreshAll();
+startAutoRefresh();
+</script>
+</body>
+</html>
