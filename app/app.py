@@ -727,12 +727,18 @@ def api_poller_status():
         except ValueError:
             pass
 
+    try:
+        db_size_bytes = os.path.getsize(DB_PATH)
+    except OSError:
+        db_size_bytes = None
+
     return jsonify(
         last_timestamp=last_timestamp,
         lag_seconds=lag_seconds,
         total_events=total_events,
         retention_days=RETENTION_DAYS,
         poller_configured=bool(NB_API_BASE and NB_API_TOKEN),
+        db_size_bytes=db_size_bytes,
     )
 
 

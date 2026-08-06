@@ -86,6 +86,8 @@
   .table-wrap{ max-height: 480px; overflow:auto; }
   .flag{ margin-right:6px; }
   footer{ text-align:center; color: var(--muted); font-family: var(--mono); font-size:11px; padding: 24px; }
+  footer a{ color: var(--accent-info); text-decoration:none; }
+  footer a:hover{ text-decoration:underline; }
 
   #active-filters{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
   #active-filters:empty{ display:none; }
@@ -299,7 +301,11 @@
   </div>
 </main>
 
-<footer>NetBird Proxy Access Dashboard · Daten via /api/events/proxy · Lokale SQLite-Historie</footer>
+<footer>
+  NetBird Proxy Access Dashboard · Daten via /api/events/proxy · Lokale SQLite-Historie
+  · API: <a href="/api/poller-status">/api/poller-status</a>, <a href="/api/stats">/api/stats</a>, <a href="/api/events">/api/events</a>
+  · DB: <span id="footer-db-size">–</span> · <span id="footer-events">–</span> Events
+</footer>
 
 <script>
 let currentRange = "24h";
@@ -867,6 +873,10 @@ async function loadPollerStatus(){
       el.className = data.lag_seconds < 120 ? "" : (data.lag_seconds < 600 ? "stale" : "dead");
       text.textContent = `Sync ${fmtLag(data.lag_seconds)}`;
     }
+    document.getElementById("footer-db-size").textContent =
+      data.db_size_bytes != null ? formatBytes(data.db_size_bytes) : "–";
+    document.getElementById("footer-events").textContent =
+      data.total_events != null ? data.total_events.toLocaleString("de-CH") : "–";
   }catch(e){
     console.warn("Poller-Status konnte nicht geladen werden", e);
   }
