@@ -347,6 +347,14 @@ UNKNOWN_CITY_LABEL = "(unbekannt)"
 INTERNAL_COUNTRY_LABEL = "LAN"
 INTERNAL_CITY_LABEL = "Internes Netzwerk (LAN)"
 
+# NetBird-Mesh-Peers kommunizieren ueber eine CGNAT-Adresse (100.64.0.0/10, RFC 6598) -
+# ipaddress.is_private() rechnet dieses Sonder-Range NICHT zu den privaten Adressen,
+# ohne eigene Erkennung landen diese Events also im "unbekannt"-Bucket statt als das
+# erkannt zu werden was sie sind: eigener Mesh-Traffic, kein echtes Ausland/GeoIP-Fehler.
+NBM_COUNTRY_LABEL = "NBM"
+NBM_CITY_LABEL = "NetBird-Mesh"
+_NETBIRD_MESH_NET = ipaddress.ip_network("100.64.0.0/10")
+
 # SQL-Gegenstueck zu is_private_ip() - deckt RFC1918 (10/8, 172.16/12, 192.168/16),
 # Loopback und Link-Local ab, damit Klicks auf einen "LAN"/"unbekannt"-Balken serverseitig
 # dieselbe Menge an Events treffen wie die Python-seitige Zuordnung unten.
@@ -357,6 +365,10 @@ _PRIVATE_IP_SQL = (
     " OR source_ip = '::1' OR source_ip LIKE 'fe80:%'"
     " OR source_ip LIKE 'fc%' OR source_ip LIKE 'fd%')"
 )
+
+# SQL-Gegenstueck zu is_netbird_mesh_ip() - 100.64.0.0/10 deckt die zweiten Oktette
+# 64-127 ab, dafuer gibt es kein kurzes LIKE-Muster wie bei den /8- und /16-Netzen oben.
+_NETBIRD_MESH_SQL = "(" + " OR ".join(f"source_ip LIKE '100.{i}.%'" for i in range(64, 128)) + ")"
 
 
 def is_private_ip(ip):
@@ -370,16 +382,35 @@ def is_private_ip(ip):
         return False
 
 
+def is_netbird_mesh_ip(ip):
+    """True fuer NetBird-Mesh-CGNAT-Adressen (100.64.0.0/10). Muss mit
+    _NETBIRD_MESH_SQL in Sync bleiben, siehe dortigen Kommentar."""
+    if not ip:
+        return False
+    try:
+        return ipaddress.ip_address(ip) in _NETBIRD_MESH_NET
+    except ValueError:
+        return False
+
+
 def label_country(raw_country, source_ip):
     if raw_country:
         return raw_country
-    return INTERNAL_COUNTRY_LABEL if is_private_ip(source_ip) else UNKNOWN_COUNTRY_LABEL
+    if is_private_ip(source_ip):
+        return INTERNAL_COUNTRY_LABEL
+    if is_netbird_mesh_ip(source_ip):
+        return NBM_COUNTRY_LABEL
+    return UNKNOWN_COUNTRY_LABEL
 
 
 def label_city(raw_city, source_ip):
     if raw_city:
         return raw_city
-    return INTERNAL_CITY_LABEL if is_private_ip(source_ip) else UNKNOWN_CITY_LABEL
+    if is_private_ip(source_ip):
+        return INTERNAL_CITY_LABEL
+    if is_netbird_mesh_ip(source_ip):
+        return NBM_CITY_LABEL
+    return UNKNOWN_CITY_LABEL
 
 
 def apply_common_filters(args, where_clauses, params):
@@ -407,8 +438,12 @@ def apply_common_filters(args, where_clauses, params):
     if country:
         if country == INTERNAL_COUNTRY_LABEL:
             where_clauses.append(f"((country_code IS NULL OR country_code = '') AND {_PRIVATE_IP_SQL})")
+        elif country == NBM_COUNTRY_LABEL:
+            where_clauses.append(f"((country_code IS NULL OR country_code = '') AND {_NETBIRD_MESH_SQL})")
         elif country == UNKNOWN_COUNTRY_LABEL:
-            where_clauses.append(f"((country_code IS NULL OR country_code = '') AND NOT {_PRIVATE_IP_SQL})")
+            where_clauses.append(
+                f"((country_code IS NULL OR country_code = '') AND NOT {_PRIVATE_IP_SQL} AND NOT {_NETBIRD_MESH_SQL})"
+            )
         else:
             where_clauses.append("country_code = ?")
             params.append(country)
@@ -433,8 +468,12 @@ def apply_common_filters(args, where_clauses, params):
     if city:
         if city == INTERNAL_CITY_LABEL:
             where_clauses.append(f"((city_name IS NULL OR city_name = '') AND {_PRIVATE_IP_SQL})")
+        elif city == NBM_CITY_LABEL:
+            where_clauses.append(f"((city_name IS NULL OR city_name = '') AND {_NETBIRD_MESH_SQL})")
         elif city == UNKNOWN_CITY_LABEL:
-            where_clauses.append(f"((city_name IS NULL OR city_name = '') AND NOT {_PRIVATE_IP_SQL})")
+            where_clauses.append(
+                f"((city_name IS NULL OR city_name = '') AND NOT {_PRIVATE_IP_SQL} AND NOT {_NETBIRD_MESH_SQL})"
+            )
         else:
             where_clauses.append("city_name = ?")
             params.append(city)

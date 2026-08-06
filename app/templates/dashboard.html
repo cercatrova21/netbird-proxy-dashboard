@@ -317,8 +317,10 @@ const STATUS_LABELS = { "allowed": "Erlaubt", "denied": "Blockiert" };
 const UNKNOWN_HOST = "(unbekannt)";
 const UNKNOWN_COUNTRY = "??";
 const INTERNAL_COUNTRY = "LAN";
+const NBM_COUNTRY = "NBM";
 const UNKNOWN_CITY = "(unbekannt)";
 const INTERNAL_CITY = "Internes Netzwerk (LAN)";
+const NBM_CITY = "NetBird-Mesh";
 
 function escapeHtml(value){
   if(value === null || value === undefined) return "";
@@ -336,12 +338,14 @@ function flagEmoji(code){
 // statt beides gleich als kaputte Flagge + "??" anzuzeigen.
 function countryLabel(code){
   if(code === INTERNAL_COUNTRY) return "🏠 Internes Netz (LAN)";
+  if(code === NBM_COUNTRY) return "🕸️ NetBird-Mesh";
   if(code === UNKNOWN_COUNTRY || !code) return "❓ Unbekannt";
   return `${flagEmoji(code)} ${code}`;
 }
 
 function cityLabel(cityName, countryCode){
   if(cityName === INTERNAL_CITY) return `🏠 ${INTERNAL_CITY}`;
+  if(cityName === NBM_CITY) return `🕸️ ${NBM_CITY}`;
   if(cityName === UNKNOWN_CITY || !cityName) return UNKNOWN_CITY;
   return `${cityName} (${countryCode})`;
 }
@@ -556,7 +560,7 @@ document.getElementById("anomalies").addEventListener("click", (ev) => {
 function updateWorldMap(countries){
   countryCounts = {};
   countries.forEach(r => {
-    if(r.country_code && r.country_code !== UNKNOWN_COUNTRY && r.country_code !== INTERNAL_COUNTRY){
+    if(r.country_code && r.country_code !== UNKNOWN_COUNTRY && r.country_code !== INTERNAL_COUNTRY && r.country_code !== NBM_COUNTRY){
       countryCounts[r.country_code.toUpperCase()] = r.c;
     }
   });
@@ -578,7 +582,7 @@ function updateMapSelection(){
   if(!worldMap) return;
   try{
     worldMap.clearSelectedRegions();
-    if(filters.country && filters.country !== UNKNOWN_COUNTRY && filters.country !== INTERNAL_COUNTRY){
+    if(filters.country && filters.country !== UNKNOWN_COUNTRY && filters.country !== INTERNAL_COUNTRY && filters.country !== NBM_COUNTRY){
       worldMap._setSelected("regions", [filters.country.toUpperCase()]);
     }
   }catch(e){
