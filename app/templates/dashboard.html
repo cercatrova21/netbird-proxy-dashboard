@@ -495,7 +495,8 @@ function ensureWorldMap(){
         hover: { fill: "#5b9dff", cursor: "pointer" },
         // Nur der Rand wird ueberschrieben (kein fill), damit die Volumen-Einfaerbung
         // des gefilterten Landes sichtbar bleibt - der Ring markiert nur den aktiven Filter.
-        selected: { stroke: "#f2b84b", strokeWidth: 2.5 },
+        // Blau statt Gold/Orange, damit sich der Ring von der orangen Requests-Skala abhebt.
+        selected: { stroke: "#5b9dff", strokeWidth: 2.5 },
       },
       series: {
         regions: [{
@@ -565,7 +566,7 @@ document.getElementById("anomalies").addEventListener("click", (ev) => {
 });
 
 const REQUEST_SCALE_LOW = [0x1b, 0x25, 0x32];   // #1b2532, wenig Requests
-const REQUEST_SCALE_HIGH = [0x5b, 0x9d, 0xff];  // #5b9dff, viele Requests
+const REQUEST_SCALE_HIGH = [0xf2, 0xb8, 0x4b];  // #f2b84b (--accent-amber), viele Requests
 
 function mixHex(t){
   const c = REQUEST_SCALE_LOW.map((lo, i) => Math.round(lo + (REQUEST_SCALE_HIGH[i] - lo) * t));
