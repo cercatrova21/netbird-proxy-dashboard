@@ -500,8 +500,9 @@ function ensureWorldMap(){
       series: {
         regions: [{
           values: countryCounts,
-          scale: ["#1b2532", "#5b9dff"],
-          normalizeFunction: "polynomial",
+          // Platzhalter bei Init - wird bei jedem updateWorldMap() durch eine
+          // pro-Land vorberechnete Farbtabelle ersetzt, siehe dortigen Kommentar.
+          scale: {},
         }],
       },
       onRegionTooltipShow(event, tooltip, code){
@@ -563,6 +564,14 @@ document.getElementById("anomalies").addEventListener("click", (ev) => {
   setFilter(el.dataset.filterKey, el.dataset.filterValue);
 });
 
+const REQUEST_SCALE_LOW = [0x1b, 0x25, 0x32];   // #1b2532, wenig Requests
+const REQUEST_SCALE_HIGH = [0x5b, 0x9d, 0xff];  // #5b9dff, viele Requests
+
+function mixHex(t){
+  const c = REQUEST_SCALE_LOW.map((lo, i) => Math.round(lo + (REQUEST_SCALE_HIGH[i] - lo) * t));
+  return "#" + c.map(v => v.toString(16).padStart(2, "0")).join("");
+}
+
 function updateWorldMap(countries){
   countryCounts = {};
   countries.forEach(r => {
@@ -573,7 +582,30 @@ function updateWorldMap(countries){
   ensureWorldMap();
   if(!worldMap) return;
   try{
-    worldMap.series.regions[0].setValues(countryCounts);
+    // jsVectorMap@1.5.3's series "scale" ist KEIN Gradient-Interpolator, obwohl die
+    // Config das nahelegt - Series.setValues() macht intern `this.scale.getValue(wert)`,
+    // also `scale[wert]` mit dem rohen Request-Count (z.B. 6266) als Index/Key. Mit nur
+    // zwei Skalen-Eintraegen ist das fuer praktisch jeden echten Wert `undefined`, das
+    // Land behaelt also stillschweigend die Default-Fuellfarbe. `normalizeFunction`
+    // (sollte Rohwerte vorher auf 0/1 bucketen) ist in dieser Library-Version nirgends
+    // implementiert. Fix: Farbe pro Land selbst interpolieren, Lookup-Tabelle per
+    // Laendercode statt Rohwert keyen, und Werte auf sich selbst mappen, damit
+    // getValue(code) den Eintrag findet.
+    const codes = Object.keys(countryCounts);
+    const counts = codes.map(c => countryCounts[c]);
+    const max = counts.length ? Math.max(...counts) : 0;
+    const min = counts.length ? Math.min(...counts) : 0;
+    const colorByCode = {};
+    const selfKeyed = {};
+    codes.forEach(code => {
+      // sqrt-Kompression, damit ein paar dominante Laender (z.B. DE/CH) nicht alle
+      // anderen ganz ans untere Ende der Skala draengen.
+      const t = max > min ? Math.sqrt((countryCounts[code] - min) / (max - min)) : 1;
+      colorByCode[code] = mixHex(t);
+      selfKeyed[code] = code;
+    });
+    worldMap.series.regions[0].scale._scale = colorByCode;
+    worldMap.series.regions[0].setValues(selfKeyed);
   }catch(e){
     console.warn("Kartenaktualisierung fehlgeschlagen", e);
   }
