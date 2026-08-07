@@ -721,6 +721,19 @@ function fmtTime(ts){
   }catch(e){ return ts; }
 }
 
+// Fuer stuendliche Chart-Achsenbeschriftungen (Requests/Latenz ueber Zeit) -
+// die Backend-Buckets sind UTC-Stundenslots (z.B. "2026-08-07T06:00:00Z"),
+// die hier unformatiert als Label landeten (Zulu-Zeit statt Europe/Zurich).
+function fmtBucketLabel(bucket){
+  try{
+    const d = new Date(bucket);
+    return d.toLocaleString("de-CH", {
+      timeZone: "Europe/Zurich",
+      day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit"
+    });
+  }catch(e){ return bucket; }
+}
+
 function destroyChart(id){
   if(charts[id]){ charts[id].destroy(); }
 }
@@ -926,7 +939,7 @@ async function loadStats(){
   charts.ts = new Chart(document.getElementById("chart-timeseries"), {
     type: "line",
     data: {
-      labels: data.timeseries.map(r => r.bucket),
+      labels: data.timeseries.map(r => fmtBucketLabel(r.bucket)),
       datasets: [{
         label: "Requests/Stunde", data: data.timeseries.map(r => r.c),
         borderColor: "#5b9dff", backgroundColor: "rgba(91,157,255,.12)",
@@ -986,7 +999,7 @@ async function loadStats(){
   charts.latency = new Chart(document.getElementById("chart-latency"), {
     type: "line",
     data: {
-      labels: data.latency_timeseries.map(r => r.bucket),
+      labels: data.latency_timeseries.map(r => fmtBucketLabel(r.bucket)),
       datasets: [{
         label: "Ø Latenz", data: data.latency_timeseries.map(r => Math.round(r.avg_ms)),
         borderColor: "#f2b84b", backgroundColor: "rgba(242,184,75,.12)",
