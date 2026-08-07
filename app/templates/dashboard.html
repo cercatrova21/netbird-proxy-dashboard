@@ -729,14 +729,6 @@ function ensureWorldMap(){
         // Blau statt Gold/Orange, damit sich der Ring von der orangen Requests-Skala abhebt.
         selected: { stroke: "#5b9dff", strokeWidth: 2.5 },
       },
-      series: {
-        regions: [{
-          values: countryCounts,
-          // Platzhalter bei Init - wird bei jedem updateWorldMap() durch eine
-          // pro-Land vorberechnete Farbtabelle ersetzt, siehe dortigen Kommentar.
-          scale: {},
-        }],
-      },
       onRegionTooltipShow(event, tooltip, code){
         const n = countryCounts[code] || 0;
         tooltip.text(`${tooltip.text()}: ${n.toLocaleString("de-CH")} Requests`, true);
@@ -814,30 +806,28 @@ function updateWorldMap(countries){
   ensureWorldMap();
   if(!worldMap) return;
   try{
-    // jsVectorMap@1.5.3's series "scale" ist KEIN Gradient-Interpolator, obwohl die
-    // Config das nahelegt - Series.setValues() macht intern `this.scale.getValue(wert)`,
-    // also `scale[wert]` mit dem rohen Request-Count (z.B. 6266) als Index/Key. Mit nur
-    // zwei Skalen-Eintraegen ist das fuer praktisch jeden echten Wert `undefined`, das
-    // Land behaelt also stillschweigend die Default-Fuellfarbe. `normalizeFunction`
-    // (sollte Rohwerte vorher auf 0/1 bucketen) ist in dieser Library-Version nirgends
-    // implementiert. Fix: Farbe pro Land selbst interpolieren, Lookup-Tabelle per
-    // Laendercode statt Rohwert keyen, und Werte auf sich selbst mappen, damit
-    // getValue(code) den Eintrag findet.
     const codes = Object.keys(countryCounts);
     const counts = codes.map(c => countryCounts[c]);
     const max = counts.length ? Math.max(...counts) : 0;
     const min = counts.length ? Math.min(...counts) : 0;
     const colorByCode = {};
-    const selfKeyed = {};
     codes.forEach(code => {
       // sqrt-Kompression, damit ein paar dominante Laender (z.B. DE/CH) nicht alle
       // anderen ganz ans untere Ende der Skala draengen.
       const t = max > min ? Math.sqrt((countryCounts[code] - min) / (max - min)) : 1;
       colorByCode[code] = mixHex(t);
-      selfKeyed[code] = code;
     });
-    worldMap.series.regions[0].scale._scale = colorByCode;
-    worldMap.series.regions[0].setValues(selfKeyed);
+    // jsVectorMap@1.5.3's Series.setValues() bemalt nur Laender, die im uebergebenen
+    // Werte-Objekt vorkommen, und traegt nirgends nach, welche Laender beim letzten
+    // Aufruf gesetzt wurden - faellt ein Land aus dem gefilterten Datensatz raus (oder
+    // kommt beim Entfernen eines Filters wieder rein), behaelt es einfach die Farbe vom
+    // letzten Aufruf, egal ob die noch stimmt. Deshalb hier bei jedem updateWorldMap()
+    // JEDE Region explizit setzen statt nur die aktuell befuellten - so bildet die Karte
+    // immer exakt den aktuellen Filter ab, nie einen Ueberrest einer frueheren Ansicht.
+    Object.keys(worldMap.regions).forEach(code => {
+      const el = worldMap.regions[code].element;
+      el.setStyle("fill", colorByCode[code] || el.shape.style.initial.fill);
+    });
   }catch(e){
     console.warn("Kartenaktualisierung fehlgeschlagen", e);
   }
