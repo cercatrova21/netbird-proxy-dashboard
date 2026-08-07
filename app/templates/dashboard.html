@@ -867,6 +867,12 @@ function renderAnomalies(anomalies){
         <span>Bei ${a.count.toLocaleString("de-CH")} Request(s) im gewählten Zeitraum war CrowdSec beim Bouncer-Check nicht erreichbar - Sicherheits-Blindspot pruefen</span>
       </div>`;
     }
+    if(a.type === "traffic_spike"){
+      return `<div class="anomaly">
+        <span class="tag">Spike</span>
+        <span>${a.current.toLocaleString("de-CH")} Requests im gewählten Zeitraum - ${(a.current / a.previous).toFixed(1)}× mehr als im gleich langen Zeitraum davor (${a.previous.toLocaleString("de-CH")})</span>
+      </div>`;
+    }
     return "";
   }).join("");
 }

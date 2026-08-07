@@ -542,6 +542,22 @@ def resolve_range(range_key, args):
     return range_cutoff(range_key), None
 
 
+def _parse_iso(ts):
+    """Parses the ISO-UTC timestamp strings used throughout this module
+    (both the bare-second ones from range_cutoff()/strftime and the
+    millisecond ones the browser sends for range=custom) into an aware
+    datetime. Python 3.11+'s fromisoformat() accepts the trailing 'Z' directly."""
+    return datetime.fromisoformat(ts)
+
+
+def _format_ts_with_millis(dt):
+    """Always includes a fractional-seconds part, unlike the bare-second
+    '%Y-%m-%dT%H:%M:%SZ' strings used elsewhere - avoids a lexical string-
+    comparison pitfall where a fractionless boundary can sort as "later" than
+    a fraction-suffixed timestamp in the exact same second (ASCII 'Z' > '.')."""
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
+
+
 BUCKET_CONDITIONS = {
     "2xx": "(status_code >= 200 AND status_code < 300)",
     "3xx": "(status_code >= 300 AND status_code < 400)",
@@ -984,6 +1000,36 @@ def _compute_stats(args):
                 "first_seen": r["first_seen"],
                 "count": r["c"],
             })
+
+    # Traffic-Spike: Requests im gewaehlten Fenster vs. das direkt davor liegende,
+    # gleich lange Fenster - MIT denselben Cross-Filtern, sonst wuerde eine
+    # gefilterte Ansicht (z.B. host=x) staendig gegen den ungefilterten Vorher-
+    # Wert verglichen. "all" hat kein sinnvolles "davor", ein offenes
+    # range=custom (nur "from" oder nur "to") hat keine bestimmbare
+    # Fensterlaenge - beides daher ausgenommen.
+    window_delta = (
+        RANGE_TO_DELTA.get(range_key) if range_key != "custom"
+        else (_parse_iso(until) - _parse_iso(cutoff)) if (cutoff and until) else None
+    )
+    if window_delta:
+        try:
+            prior_until = cutoff
+            prior_cutoff = _format_ts_with_millis(_parse_iso(cutoff) - window_delta)
+            prior_where = ["timestamp >= ?", "timestamp < ?"]
+            prior_params = [prior_cutoff, prior_until]
+            apply_common_filters(args, prior_where, prior_params)
+            previous_count = conn.execute(
+                f"SELECT COUNT(*) c FROM proxy_events WHERE {' AND '.join(prior_where)}",
+                prior_params,
+            ).fetchone()["c"]
+            if previous_count >= 20 and total_requests >= previous_count * 3:
+                anomalies.append({
+                    "type": "traffic_spike",
+                    "current": total_requests,
+                    "previous": previous_count,
+                })
+        except (ValueError, TypeError):
+            log.warning("Traffic-Spike-Anomalie uebersprungen - Range-Grenzen nicht parsbar")
 
     for ip, c in denies_by_ip.most_common(10):
         if c >= ANOMALY_DENY_THRESHOLD:
