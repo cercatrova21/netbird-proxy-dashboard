@@ -1073,7 +1073,23 @@ async function loadStats(){
           fill:true, tension:.25, pointRadius:0, borderWidth:2 }
       ]
     },
-    options: baseOptions({})
+    // Rohe Byte-Werte (bis in den GB-Bereich pro Stunden-Bucket) als y-Achsen-
+    // Ticks sprengen sonst die Spaltenbreite der Karte (z.B. "5.129.676.258")
+    // und damit die Ausrichtung der ganzen Grid-Zeile - wie schon bei "Traffic
+    // nach Host" ueber formatBytes() lesbar machen. baseOptions() mergt nur
+    // flach (Object.assign), deshalb hier scales/plugins komplett statt nur
+    // des geaenderten Teils angeben - sonst faellt z.B. die x-Achsen-Faerbung
+    // oder die Legenden-Farbe unbemerkt auf Chart.js-Default zurueck.
+    options: baseOptions({
+      scales:{
+        x:{ ticks:{ color:"#7d8ba0", font:{size:10} }, grid:{ color:"#1b2532" } },
+        y:{ ticks:{ color:"#7d8ba0", font:{size:10}, callback: v => formatBytes(v) }, grid:{ color:"#1b2532" } }
+      },
+      plugins:{
+        legend:{ labels:{ color:"#7d8ba0", font:{family:"JetBrains Mono", size:11} } },
+        tooltip:{ callbacks:{ label: ctx => `${ctx.dataset.label}: ${formatBytes(ctx.parsed.y)}` } }
+      }
+    })
   });
 
   // Langsamste Endpunkte
