@@ -11,25 +11,35 @@ services:
       INITIAL_BACKFILL_DAYS: ${INITIAL_BACKFILL_DAYS:-7}
       RETENTION_DAYS: ${RETENTION_DAYS:-0}
       ANOMALY_DENY_THRESHOLD: ${ANOMALY_DENY_THRESHOLD:-10}
-      STATS_CACHE_SECONDS: ${STATS_CACHE_SECONDS:-20}
+      CROWDSEC_API_URL: ${CROWDSEC_API_URL:-}
+      CROWDSEC_MACHINE_ID: ${CROWDSEC_MACHINE_ID:-}
+      CROWDSEC_MACHINE_PASSWORD: ${CROWDSEC_MACHINE_PASSWORD:-}
+      WHITELIST_FILE_PATH: /whitelist/netbird-proxy-whitelist.yaml
+      WHITELIST_CONTAINER_NAME: ${WHITELIST_CONTAINER_NAME:-netbird-logparser}
       TZ: ${TZ:-Europe/Zurich}
     volumes:
       - ./data:/data
+      # Docker-Socket: nur fuer den expliziten "Anwenden"-Knopf im Whitelist-Widget,
+      # der netbird-logparser neu startet, damit eine geaenderte Whitelist-Datei
+      # geladen wird (CrowdSec liest Parser-Config nur beim Start neu ein).
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Die lokale CrowdSec-Whitelist-Datei von netbird-logparser - hier kann das
+      # Dashboard Eintraege hinzufuegen/entfernen (wirksam erst nach obigem Neustart).
+      - ${WHITELIST_HOST_FILE_PATH:-/opt/netbird/netbird-logparser/postoverflows/s01-whitelist/netbird-proxy-whitelist.yaml}:/whitelist/netbird-proxy-whitelist.yaml
     ports:
-      # Binds the port ONLY to the given interface IP (e.g. your NetBird/WireGuard
-      # mesh IP), so the dashboard is reachable exclusively over that network
-      # and doesn't need its own authentication in front of it. Find your
-      # NetBird IP with:
-      #   netbird status
-      # or
+      # Bindet den Port NUR an deine eigene NetBird-Interface-IP.
+      # Dadurch ist das Dashboard ausschliesslich ueber das NetBird-Mesh erreichbar
+      # (kein zusaetzliches Passwort noetig). IP ermitteln mit:
+      #   netbird status   ->  NetBird IP
+      # oder
       #   ip a show wt0
       - "${DASHBOARD_BIND_IP}:${DASHBOARD_PORT:-8098}:8098"
 
-    # If your NetBird management server runs in the same Compose project / the
-    # same Docker network, you can point NB_API_BASE directly at the container
-    # name (e.g. http://management:80) instead of going through the public
-    # domain + reverse proxy. To do that, attach the external network below
-    # and adjust the name to match your actual network/service name:
+    # Falls netbird-management im selben Compose-Projekt / selben Docker-Netzwerk
+    # laeuft, kann NB_API_BASE direkt auf den Containernamen zeigen
+    # (z.B. http://management:80 oder http://netbird-management:80)
+    # statt ueber die oeffentliche Domain + Traefik zu gehen. Dazu einfach das externe
+    # Netzwerk unten aktivieren und den Namen an das tatsaechliche Netz/Servicename anpassen:
     #
     # networks:
     #   - netbird_default

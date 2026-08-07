@@ -2,8 +2,19 @@
 <html lang="de">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>NetBird Proxy Access · Dashboard</title>
+
+<!-- PWA: macht "Zum Startbildschirm hinzufuegen" / "Install and create shortcut"
+     (Chromium/Vanadium) zu einer eigenstaendigen App ohne Adressleiste. -->
+<link rel="manifest" href="{{ url_for('manifest') }}">
+<meta name="theme-color" content="#0d1117">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="icon" href="{{ url_for('static', filename='icon-192.png') }}" sizes="192x192">
+<link rel="apple-touch-icon" href="{{ url_for('static', filename='icon-192.png') }}">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Proxy Dashboard">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/jsvectormap@1.5.3/dist/css/jsvectormap.min.css">
 <script src="https://cdn.jsdelivr.net/npm/jsvectormap@1.5.3/dist/js/jsvectormap.min.js"></script>
@@ -30,7 +41,8 @@
   }
   header.top{
     display:flex; align-items:center; justify-content:space-between;
-    padding: 14px 22px; border-bottom: 1px solid var(--border);
+    padding: calc(14px + env(safe-area-inset-top)) 22px 14px 22px;
+    border-bottom: 1px solid var(--border);
     background: linear-gradient(180deg, #121924, #0d1117);
   }
   .brand{ display:flex; align-items:center; gap:10px; }
@@ -83,14 +95,84 @@
     background: var(--panel-2); border:1px solid var(--border); color: var(--text);
     padding:6px 10px; border-radius:6px; font-family: var(--mono); font-size:12px;
   }
+
+  .page-filters{
+    display:flex; align-items:center; gap:8px; margin-bottom:16px; flex-wrap:wrap;
+    background: rgba(91,157,255,.06); border:1px solid var(--border); border-radius:8px; padding:8px 10px;
+  }
+  .page-filters-label{ color: var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.06em; font-family: var(--mono); margin-right:2px; }
+  .page-filters select, .page-filters input{
+    background: var(--panel-2); border:1px solid var(--border); color: var(--text);
+    padding:6px 10px; border-radius:6px; font-family: var(--mono); font-size:12px;
+  }
+  .page-filters select:focus, .page-filters input:focus{ border-color: var(--accent-info); outline:none; }
+  .page-filters input#f-statuscode{ width:170px; }
+
+  .jump-nav{ display:flex; align-items:center; gap:8px; margin-bottom:16px; flex-wrap:wrap; }
+  .jump-nav-label{ color: var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.06em; font-family: var(--mono); margin-right:2px; }
+  .jump-nav button{
+    background: var(--panel); border:1px solid var(--border); color: var(--text);
+    padding:6px 14px; border-radius:6px; font-family: var(--mono); font-size:12px; cursor:pointer;
+  }
+  .jump-nav button:hover{ border-color: var(--accent-info); color: var(--accent-info); }
+
+  .section-title{
+    display:flex; align-items:center; gap:10px; margin: 30px 0 14px 0;
+    color: var(--muted); font-family: var(--mono); font-size:11px;
+    text-transform:uppercase; letter-spacing:.1em; scroll-margin-top: 12px;
+  }
+  .section-title::after{ content:""; flex:1; height:1px; background: var(--border); }
+
+  .collapsible-header{ display:flex; align-items:center; justify-content:space-between; cursor:pointer; user-select:none; margin:0; }
+  .collapsible-header:hover{ color: var(--accent-info); }
+  .collapsible-header .chevron{ transition: transform .15s ease; }
+  .collapsible-header.open .chevron{ transform: rotate(180deg); }
+  .collapsible-content{ display:none; }
+  .collapsible-content.open{ display:block; margin-top:12px; }
+
+  .btn{
+    background: var(--panel-2); border:1px solid var(--border); color: var(--text);
+    padding:6px 12px; border-radius:6px; font-family: var(--mono); font-size:12px; cursor:pointer;
+  }
+  .btn:hover{ border-color: var(--accent-info); color: var(--accent-info); }
+  .btn.primary{ background: rgba(91,157,255,.12); border-color: var(--accent-info); color: var(--accent-info); }
+  .btn:disabled{ opacity:.5; cursor:default; }
+
+  .action-btn{
+    background:none; border:1px solid var(--border); color: var(--muted);
+    padding:3px 8px; border-radius:6px; font-family: var(--mono); font-size:11px;
+    cursor:pointer; margin-right:4px; white-space:nowrap;
+  }
+  .action-btn:hover{ color: var(--text); border-color: var(--muted); }
+  .action-btn.danger:hover{ color: var(--accent-deny); border-color: var(--accent-deny); }
+  .action-btn.primary:hover{ color: var(--accent-ok); border-color: var(--accent-ok); }
+  .action-btn:disabled{ opacity:.5; cursor:default; }
   .table-wrap{ max-height: 480px; overflow:auto; }
   .flag{ margin-right:6px; }
-  footer{ text-align:center; color: var(--muted); font-family: var(--mono); font-size:11px; padding: 24px; }
+  footer{
+    text-align:center; color: var(--muted); font-family: var(--mono); font-size:11px;
+    padding: 24px 24px calc(24px + env(safe-area-inset-bottom)) 24px;
+  }
   footer a{ color: var(--accent-info); text-decoration:none; }
   footer a:hover{ text-decoration:underline; }
 
   #active-filters{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
-  #active-filters:empty{ display:none; }
+
+  /* Sticky statt im Toolbar verschachtelt, damit sie waehrend des Scrollens auf der
+     ganzen Seite oben sichtbar bleibt - sonst sieht/entfernt man einen aktiven Filter
+     nur, wenn man extra zurueck nach oben scrollt. */
+  .filter-bar{
+    display:none;
+    position: sticky; top: 0; z-index: 40;
+    background: #121924; border-bottom: 1px solid var(--accent-info);
+    box-shadow: 0 4px 12px rgba(0,0,0,.25);
+  }
+  .filter-bar.has-filters{ display:block; }
+  .filter-bar-inner{
+    display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+    max-width: 1320px; margin: 0 auto; padding: 8px 22px;
+  }
+  .filter-bar-label{ color: var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.06em; font-family: var(--mono); flex-shrink:0; }
   .chip{
     display:inline-flex; align-items:center; gap:6px;
     background: rgba(91,157,255,.12); border:1px solid var(--accent-info); color: var(--accent-info);
@@ -142,6 +224,14 @@
   }
   .anomaly button:hover{ color: var(--text); border-color: var(--muted); }
 
+  .reason-legend{
+    display:flex; gap:14px; flex-wrap:wrap; align-items:center;
+    color: var(--muted); font-family: var(--mono); font-size:11px; margin-bottom:12px;
+  }
+  .reason-legend-label{ text-transform:uppercase; letter-spacing:.06em; }
+  .reason-icons{ display:flex; gap:4px; flex-wrap:wrap; }
+  .reason-icons span{ cursor:default; }
+
   .mini-kpis{ display:flex; gap:18px; margin-bottom:12px; }
   .mini-kpi .label{ color: var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.07em; }
   .mini-kpi .value{ font-family: var(--mono); font-size:18px; font-weight:600; }
@@ -162,6 +252,13 @@
   <span id="last-update">lade&hellip;</span>
 </header>
 
+<div class="filter-bar" id="filter-bar">
+  <div class="filter-bar-inner">
+    <span class="filter-bar-label">Aktive Filter:</span>
+    <div id="active-filters"></div>
+  </div>
+</div>
+
 <main>
   <div class="toolbar">
     <div class="range-select" id="range-select">
@@ -174,8 +271,32 @@
       <button type="button" id="anomaly-toggle">
         <span>⚠ <span id="anomaly-count">0</span> Anomalien</span><span class="chevron">▾</span>
       </button>
-      <div id="active-filters"></div>
     </div>
+  </div>
+
+  <div class="jump-nav">
+    <span class="jump-nav-label">Zu:</span>
+    <button type="button" data-jump="sec-zugriffe">Zugriffe</button>
+    <button type="button" data-jump="sec-crowdsec">CrowdSec</button>
+    <button type="button" data-jump="sec-analytics">Analytics</button>
+  </div>
+
+  <div class="page-filters" title="Diese Filter wirken auf das gesamte Dashboard: KPIs, Diagramme, Karte und Tabelle">
+    <span class="page-filters-label">Filter (gesamte Seite):</span>
+    <select id="f-status">
+      <option value="">Status: alle</option>
+      <option value="allowed">nur erlaubt</option>
+      <option value="denied">nur blockiert</option>
+    </select>
+    <select id="f-bucket">
+      <option value="">Code-Bereich: alle</option>
+      <option value="2xx">2xx Erfolgreich</option>
+      <option value="3xx">3xx Weiterleitung</option>
+      <option value="4xx">4xx Client-Fehler</option>
+      <option value="5xx">5xx Server-Fehler</option>
+      <option value="n/a">n/a</option>
+    </select>
+    <input id="f-statuscode" type="text" inputmode="numeric" placeholder="Code exakt, z. B. 403">
   </div>
 
   <div id="anomalies"></div>
@@ -188,6 +309,91 @@
     <div class="kpi"><div class="label">Traffic gesamt</div><div class="value" id="kpi-traffic">–</div></div>
   </div>
 
+  <div class="section-title" id="sec-zugriffe">Zugriffe</div>
+  <div class="card">
+    <h2>Letzte Zugriffe</h2>
+    <div class="filters">
+      <input id="f-search" placeholder="Suche: Host, Pfad, IP, User… (!wert schliesst aus, z. B. !10.0.0.5)" style="min-width:340px;">
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Zeit</th><th>Methode</th><th>Host</th><th>Pfad</th><th>Status</th>
+            <th>Quell-IP</th><th>Land</th><th>User</th><th>Auth</th><th>Grund</th>
+          </tr>
+        </thead>
+        <tbody id="events-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="section-title" id="sec-crowdsec">CrowdSec</div>
+  <div class="card" style="margin-bottom:14px;" id="crowdsec-current-card">
+    <h2>CrowdSec · Aktuell blockierte IPs</h2>
+    <div class="mini-kpis">
+      <div class="mini-kpi"><div class="label">Aktive Blocks</div><div class="value" id="cs-active-count">–</div></div>
+    </div>
+    <div class="reason-legend">
+      <span class="reason-legend-label">Symbole:</span>
+      <span>🔑 Auth Brute-Force</span>
+      <span>🚫 Zugriffsverweigerungs-Flut</span>
+      <span>🔍 Scan sensibler Pfade</span>
+      <span>💥 Fehler-Flut</span>
+      <span>🛡️ Portscan (Firewall)</span>
+    </div>
+    <div class="table-wrap" style="max-height:280px;">
+      <table>
+        <thead>
+          <tr><th>IP</th><th>Land</th><th>Provider (AS)</th><th>Gründe</th><th>Events</th><th>Blockiert seit</th><th>Läuft ab in</th><th>Aktionen</th></tr>
+        </thead>
+        <tbody id="crowdsec-current-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 class="collapsible-header" id="cs-history-toggle" role="button" tabindex="0" aria-expanded="false">
+      <span>CrowdSec · Block-Verlauf</span><span class="chevron">▾</span>
+    </h2>
+    <div class="collapsible-content" id="cs-history-content">
+      <div class="filters">
+        <input id="cs-search" placeholder="Suche: IP, Land, Provider, Grund… (!wert schliesst aus)" style="min-width:340px;">
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Zeit</th><th>IP</th><th>Land</th><th>Provider (AS)</th><th>Grund</th><th>Events</th><th>Status</th></tr>
+          </thead>
+          <tbody id="crowdsec-history-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 class="collapsible-header" id="cs-whitelist-toggle" role="button" tabindex="0" aria-expanded="false">
+      <span>CrowdSec · Whitelist</span><span class="chevron">▾</span>
+    </h2>
+    <div class="collapsible-content" id="cs-whitelist-content">
+      <div class="filters" style="align-items:center;">
+        <input id="cs-whitelist-input" placeholder="IP oder CIDR, z. B. 1.2.3.4 oder 10.0.0.0/8" style="min-width:260px;">
+        <button type="button" class="btn primary" id="cs-whitelist-add-btn">Hinzufügen</button>
+        <span id="cs-whitelist-dirty-note" style="display:none; color: var(--accent-amber); font-family: var(--mono); font-size:12px;">
+          ● Änderungen noch nicht angewendet
+        </span>
+        <button type="button" class="btn" id="cs-whitelist-apply-btn" style="display:none;">Anwenden (Neustart netbird-logparser)</button>
+      </div>
+      <div class="table-wrap" style="max-height:280px;">
+        <table>
+          <thead><tr><th style="width:90px;">Typ</th><th>Wert</th><th style="width:100px;">Aktion</th></tr></thead>
+          <tbody id="crowdsec-whitelist-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="section-title" id="sec-analytics">Analytics</div>
   <div class="card" style="margin-bottom:14px;">
     <h2>Herkunft der Zugriffe</h2>
     <div id="map"></div>
@@ -276,29 +482,6 @@
       <tbody id="reasons-body"></tbody>
     </table>
   </div>
-
-  <div class="card">
-    <h2>Letzte Zugriffe</h2>
-    <div class="filters">
-      <input id="f-search" placeholder="Suche: Host, Pfad, IP, User…" style="min-width:240px;">
-      <select id="f-status">
-        <option value="">alle</option>
-        <option value="allowed">nur erlaubt</option>
-        <option value="denied">nur blockiert</option>
-      </select>
-    </div>
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Zeit</th><th>Methode</th><th>Host</th><th>Pfad</th><th>Status</th>
-            <th>Quell-IP</th><th>Land</th><th>User</th><th>Auth</th><th>Grund</th>
-          </tr>
-        </thead>
-        <tbody id="events-body"></tbody>
-      </table>
-    </div>
-  </div>
 </main>
 
 <footer>
@@ -313,13 +496,58 @@ let charts = {};
 
 // Cross-filter state: clicking a chart segment or table cell sets one of these,
 // which is then applied to every panel (KPIs, charts, table) simultaneously.
-let filters = { host: null, country: null, ip: null, status: null, bucket: null, reason: null, path: null, city: null, user_id: null };
+let filters = { host: null, country: null, ip: null, status: null, bucket: null, status_code: null, reason: null, path: null, city: null, user_id: null };
+
+// Filter-Keys, die ein eigenes Steuerelement in der "Filter (gesamte Seite)"-Zeile
+// haben - beim Setzen/Loeschen per Chart-Klick oder Chip-X muss deren Wert im UI
+// nachgezogen werden, sonst zeigt das Dropdown/Feld den alten Stand.
+const FILTER_INPUT_IDS = { status: "f-status", bucket: "f-bucket", status_code: "f-statuscode" };
+
+function syncFilterInput(key){
+  const id = FILTER_INPUT_IDS[key];
+  if(!id) return;
+  const el = document.getElementById(id);
+  if(el) el.value = filters[key] || "";
+}
 
 const BUCKET_LABELS = {
   "2xx": "2xx Erfolgreich", "3xx": "3xx Weiterleitung", "4xx": "4xx Client-Fehler",
   "5xx": "5xx Server-Fehler", "n/a": "n/a", "sonstige": "Sonstige"
 };
 const STATUS_LABELS = { "allowed": "Erlaubt", "denied": "Blockiert" };
+const CROWDSEC_SCENARIO_LABELS = {
+  "netbird-proxy/auth-bruteforce": "Auth Brute-Force",
+  "netbird-proxy/access-denied-flood": "Zugriffsverweigerungs-Flut",
+  "netbird-proxy/sensitive-path-scan": "Scan sensibler Pfade",
+  "netbird-proxy/error-flood": "Fehler-Flut",
+  "firewallservices/pf-scan-multi_ports": "Portscan (Firewall)",
+};
+function crowdsecReasonLabel(scenario){
+  return CROWDSEC_SCENARIO_LABELS[scenario] || scenario || "–";
+}
+const CROWDSEC_SCENARIO_ICONS = {
+  "netbird-proxy/auth-bruteforce": "🔑",
+  "netbird-proxy/access-denied-flood": "🚫",
+  "netbird-proxy/sensitive-path-scan": "🔍",
+  "netbird-proxy/error-flood": "💥",
+  "firewallservices/pf-scan-multi_ports": "🛡️",
+};
+function crowdsecReasonIconsHtml(scenarios){
+  return `<span class="reason-icons">${scenarios.map(s =>
+    `<span title="${escapeHtml(crowdsecReasonLabel(s))}">${CROWDSEC_SCENARIO_ICONS[s] || "❔"}</span>`
+  ).join("")}</span>`;
+}
+function formatDurationShort(seconds){
+  if(seconds === null || seconds === undefined || isNaN(seconds)) return "–";
+  seconds = Math.max(0, Math.round(seconds));
+  const d = Math.floor(seconds/86400);
+  const h = Math.floor((seconds%86400)/3600);
+  const m = Math.floor((seconds%3600)/60);
+  if(d > 0) return `${d}d ${h}h`;
+  if(h > 0) return `${h}h ${m}min`;
+  if(m > 0) return `${m}min`;
+  return `${seconds}s`;
+}
 const UNKNOWN_HOST = "(unbekannt)";
 const UNKNOWN_COUNTRY = "??";
 const INTERNAL_COUNTRY = "LAN";
@@ -343,7 +571,7 @@ function flagEmoji(code){
 // bei oeffentlicher IP) von "intern" (private LAN-IP, fuer die es gar kein Land gibt),
 // statt beides gleich als kaputte Flagge + "??" anzuzeigen.
 function countryLabel(code){
-  if(code === INTERNAL_COUNTRY) return "🏠 Internes Netz (LAN)";
+  if(code === INTERNAL_COUNTRY) return "🏠 LAN";
   if(code === NBM_COUNTRY) return "🕸️ NetBird-Mesh";
   if(code === UNKNOWN_COUNTRY || !code) return "❓ Unbekannt";
   return `${flagEmoji(code)} ${code}`;
@@ -358,7 +586,7 @@ function cityLabel(cityName, countryCode){
 
 function setFilter(key, value){
   filters[key] = (filters[key] === value) ? null : value;
-  if(key === "status"){ document.getElementById("f-status").value = filters.status || ""; }
+  syncFilterInput(key);
   renderFilterChips();
   refreshAll();
 }
@@ -366,10 +594,10 @@ function setFilter(key, value){
 function clearFilter(key){
   if(key === "all"){
     Object.keys(filters).forEach(k => filters[k] = null);
-    document.getElementById("f-status").value = "";
+    Object.keys(FILTER_INPUT_IDS).forEach(syncFilterInput);
   } else {
     filters[key] = null;
-    if(key === "status"){ document.getElementById("f-status").value = ""; }
+    syncFilterInput(key);
   }
   renderFilterChips();
   refreshAll();
@@ -386,13 +614,15 @@ function renderFilterChips(){
   if(filters.host) chips.push(chipHtml("host", "Host", filters.host));
   if(filters.ip) chips.push(chipHtml("ip", "IP", filters.ip));
   if(filters.status) chips.push(chipHtml("status", "Status", STATUS_LABELS[filters.status] || filters.status));
-  if(filters.bucket) chips.push(chipHtml("bucket", "Code", BUCKET_LABELS[filters.bucket] || filters.bucket));
+  if(filters.bucket) chips.push(chipHtml("bucket", "Code-Bereich", BUCKET_LABELS[filters.bucket] || filters.bucket));
+  if(filters.status_code) chips.push(chipHtml("status_code", "Code", filters.status_code));
   if(filters.reason) chips.push(chipHtml("reason", "Grund", filters.reason));
   if(filters.path) chips.push(chipHtml("path", "Pfad", filters.path));
   if(filters.city) chips.push(chipHtml("city", "Stadt", filters.city));
   if(filters.user_id) chips.push(chipHtml("user_id", "User", filters.user_id));
   if(chips.length > 1) chips.push(`<span class="chip clear-all" data-clear="all">Alle Filter zurücksetzen ✕</span>`);
   el.innerHTML = chips.join("");
+  document.getElementById("filter-bar").classList.toggle("has-filters", chips.length > 0);
 }
 
 function buildParams(){
@@ -402,6 +632,7 @@ function buildParams(){
   if(filters.ip) params.set("ip", filters.ip);
   if(filters.status) params.set("status", filters.status);
   if(filters.bucket) params.set("bucket", filters.bucket);
+  if(filters.status_code) params.set("status_code", filters.status_code);
   if(filters.reason) params.set("reason", filters.reason);
   if(filters.path) params.set("path", filters.path);
   if(filters.city) params.set("city", filters.city);
@@ -884,6 +1115,246 @@ document.getElementById("events-body").addEventListener("click", (ev) => {
   setFilter(el.dataset.filterKey, el.dataset.filterValue);
 });
 
+async function loadCrowdsecCurrent(){
+  const body = document.getElementById("crowdsec-current-body");
+  try{
+    const res = await fetch("/api/crowdsec/current");
+    const data = await res.json();
+    document.getElementById("cs-active-count").textContent = data.decisions.length.toLocaleString("de-CH");
+
+    if(!data.configured){
+      body.innerHTML = `<tr><td colspan="8" style="color:var(--muted)">CrowdSec-Integration nicht konfiguriert</td></tr>`;
+      return;
+    }
+    if(!data.decisions.length){
+      body.innerHTML = `<tr><td colspan="8" style="color:var(--muted)">Aktuell keine aktiven CrowdSec-Blockierungen</td></tr>`;
+      return;
+    }
+    const now = Date.now();
+    body.innerHTML = data.decisions.map(d => {
+      const remainingS = (new Date(d.expires_at).getTime() - now) / 1000;
+      const ip = escapeHtml(d.source_ip || "");
+      return `<tr>
+        <td><span class="clickable" data-filter-key="ip" data-filter-value="${ip}">${ip}</span></td>
+        <td>${d.country_code ? countryLabel(d.country_code) : "–"}</td>
+        <td>${escapeHtml(d.as_name || "–")}</td>
+        <td>${crowdsecReasonIconsHtml(d.scenarios || [])}</td>
+        <td>${d.events_count ?? "–"}</td>
+        <td>${escapeHtml(fmtTime(d.first_seen))}</td>
+        <td>${formatDurationShort(remainingS)}</td>
+        <td>
+          <button type="button" class="action-btn danger" data-action="unban" data-ip="${ip}">Ban löschen</button>
+          <button type="button" class="action-btn primary" data-action="whitelist" data-ip="${ip}">Whitelisten</button>
+        </td>
+      </tr>`;
+    }).join("");
+  }catch(e){
+    console.warn("CrowdSec-Status konnte nicht geladen werden", e);
+    body.innerHTML = `<tr><td colspan="8" style="color:var(--muted)">Fehler beim Laden</td></tr>`;
+  }
+}
+
+document.getElementById("crowdsec-current-body").addEventListener("click", async (ev) => {
+  const filterEl = ev.target.closest("[data-filter-key]");
+  if(filterEl){ setFilter(filterEl.dataset.filterKey, filterEl.dataset.filterValue); return; }
+
+  const btn = ev.target.closest("[data-action]");
+  if(!btn) return;
+  const ip = btn.dataset.ip;
+  const action = btn.dataset.action;
+
+  if(action === "unban"){
+    if(!confirm(`Ban für ${ip} jetzt löschen?`)) return;
+    btn.disabled = true;
+    try{
+      const res = await fetch(`/api/crowdsec/ban/${encodeURIComponent(ip)}`, { method: "DELETE" });
+      const data = await res.json();
+      if(!res.ok) throw new Error(data.error || "Unbekannter Fehler");
+      loadCrowdsecCurrent();
+    }catch(e){
+      alert(`Ban löschen fehlgeschlagen: ${e.message}`);
+      btn.disabled = false;
+    }
+  } else if(action === "whitelist"){
+    if(!confirm(`${ip} whitelisten und aktiven Ban sofort löschen?\n\n(Die Whitelist wird erst wirksam, nachdem du sie im Whitelist-Widget mit "Anwenden" bestätigst.)`)) return;
+    btn.disabled = true;
+    try{
+      const addRes = await fetch("/api/crowdsec/whitelist/entries", {
+        method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ value: ip })
+      });
+      const addData = await addRes.json();
+      if(!addRes.ok) throw new Error(addData.error || "Unbekannter Fehler beim Whitelisten");
+      await fetch(`/api/crowdsec/ban/${encodeURIComponent(ip)}`, { method: "DELETE" });
+      loadCrowdsecCurrent();
+      if(csWhitelistOpen) loadCrowdsecWhitelist();
+    }catch(e){
+      alert(`Whitelisten fehlgeschlagen: ${e.message}`);
+      btn.disabled = false;
+    }
+  }
+});
+
+async function loadCrowdsecHistory(){
+  const body = document.getElementById("crowdsec-history-body");
+  try{
+    const search = document.getElementById("cs-search").value.trim();
+    const params = new URLSearchParams({ range: currentRange, limit: "200" });
+    if(search) params.set("search", search);
+
+    const res = await fetch(`/api/crowdsec/history?${params.toString()}`);
+    const data = await res.json();
+
+    if(!data.configured){
+      body.innerHTML = `<tr><td colspan="7" style="color:var(--muted)">CrowdSec-Integration nicht konfiguriert</td></tr>`;
+      return;
+    }
+    body.innerHTML = data.alerts.length ? data.alerts.map(a => {
+      const statusBadge = a.is_active ? `<span class="badge deny">aktiv</span>` : `<span class="badge">abgelaufen</span>`;
+      return `<tr>
+        <td>${escapeHtml(fmtTime(a.created_at))}</td>
+        <td><span class="clickable" data-filter-key="ip" data-filter-value="${escapeHtml(a.source_ip)}">${escapeHtml(a.source_ip || "")}</span></td>
+        <td>${a.country_code ? countryLabel(a.country_code) : "–"}</td>
+        <td>${escapeHtml(a.as_name || "–")}</td>
+        <td>${escapeHtml(crowdsecReasonLabel(a.scenario))}</td>
+        <td>${a.events_count ?? "–"}</td>
+        <td>${statusBadge}</td>
+      </tr>`;
+    }).join("") : `<tr><td colspan="7" style="color:var(--muted)">Keine CrowdSec-Events im gewählten Zeitraum</td></tr>`;
+  }catch(e){
+    console.warn("CrowdSec-Verlauf konnte nicht geladen werden", e);
+    body.innerHTML = `<tr><td colspan="7" style="color:var(--muted)">Fehler beim Laden</td></tr>`;
+  }
+}
+
+document.getElementById("crowdsec-history-body").addEventListener("click", (ev) => {
+  const el = ev.target.closest("[data-filter-key]");
+  if(!el) return;
+  setFilter(el.dataset.filterKey, el.dataset.filterValue);
+});
+document.getElementById("cs-search").addEventListener("input", () => { clearTimeout(window._cst); window._cst = setTimeout(loadCrowdsecHistory, 300); });
+
+// Block-Verlauf ist standardmaessig zugeklappt (am seltensten gebraucht) - wird
+// erst beim Aufklappen geladen und danach nur noch aktualisiert, waehrend er offen ist.
+let csHistoryOpen = false;
+const csHistoryToggle = document.getElementById("cs-history-toggle");
+const csHistoryContent = document.getElementById("cs-history-content");
+
+function setCsHistoryOpen(open){
+  csHistoryOpen = open;
+  csHistoryToggle.classList.toggle("open", open);
+  csHistoryToggle.setAttribute("aria-expanded", open);
+  csHistoryContent.classList.toggle("open", open);
+  if(open) loadCrowdsecHistory();
+}
+csHistoryToggle.addEventListener("click", () => setCsHistoryOpen(!csHistoryOpen));
+csHistoryToggle.addEventListener("keydown", (ev) => {
+  if(ev.key === "Enter" || ev.key === " "){ ev.preventDefault(); setCsHistoryOpen(!csHistoryOpen); }
+});
+
+// Whitelist-Widget: ebenfalls standardmaessig zugeklappt und nur bei Bedarf geladen.
+let csWhitelistOpen = false;
+const csWhitelistToggle = document.getElementById("cs-whitelist-toggle");
+const csWhitelistContent = document.getElementById("cs-whitelist-content");
+
+function setCsWhitelistOpen(open){
+  csWhitelistOpen = open;
+  csWhitelistToggle.classList.toggle("open", open);
+  csWhitelistToggle.setAttribute("aria-expanded", open);
+  csWhitelistContent.classList.toggle("open", open);
+  if(open) loadCrowdsecWhitelist();
+}
+csWhitelistToggle.addEventListener("click", () => setCsWhitelistOpen(!csWhitelistOpen));
+csWhitelistToggle.addEventListener("keydown", (ev) => {
+  if(ev.key === "Enter" || ev.key === " "){ ev.preventDefault(); setCsWhitelistOpen(!csWhitelistOpen); }
+});
+
+async function loadCrowdsecWhitelist(){
+  const body = document.getElementById("crowdsec-whitelist-body");
+  const dirtyNote = document.getElementById("cs-whitelist-dirty-note");
+  const applyBtn = document.getElementById("cs-whitelist-apply-btn");
+  try{
+    const res = await fetch("/api/crowdsec/whitelist");
+    const data = await res.json();
+    if(!data.configured){
+      body.innerHTML = `<tr><td colspan="3" style="color:var(--muted)">Whitelist-Verwaltung nicht konfiguriert</td></tr>`;
+      dirtyNote.style.display = "none";
+      applyBtn.style.display = "none";
+      return;
+    }
+    const rows = [
+      ...data.ip.map(v => ({ type: "IP", value: v })),
+      ...data.cidr.map(v => ({ type: "CIDR", value: v })),
+    ];
+    body.innerHTML = rows.length ? rows.map(r => `<tr>
+      <td>${r.type}</td>
+      <td>${escapeHtml(r.value)}</td>
+      <td><button type="button" class="action-btn danger" data-remove="${escapeHtml(r.value)}">Entfernen</button></td>
+    </tr>`).join("") : `<tr><td colspan="3" style="color:var(--muted)">Keine Einträge</td></tr>`;
+    dirtyNote.style.display = data.dirty ? "inline" : "none";
+    applyBtn.style.display = data.dirty ? "inline-block" : "none";
+  }catch(e){
+    console.warn("Whitelist konnte nicht geladen werden", e);
+    body.innerHTML = `<tr><td colspan="3" style="color:var(--muted)">Fehler beim Laden</td></tr>`;
+  }
+}
+
+document.getElementById("crowdsec-whitelist-body").addEventListener("click", async (ev) => {
+  const btn = ev.target.closest("[data-remove]");
+  if(!btn) return;
+  const value = btn.dataset.remove;
+  if(!confirm(`"${value}" aus der Whitelist entfernen?`)) return;
+  btn.disabled = true;
+  try{
+    const res = await fetch(`/api/crowdsec/whitelist/entries?value=${encodeURIComponent(value)}`, { method: "DELETE" });
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.error || "Unbekannter Fehler");
+    loadCrowdsecWhitelist();
+  }catch(e){
+    alert(`Entfernen fehlgeschlagen: ${e.message}`);
+    btn.disabled = false;
+  }
+});
+
+async function addCrowdsecWhitelistEntry(){
+  const input = document.getElementById("cs-whitelist-input");
+  const value = input.value.trim();
+  if(!value) return;
+  try{
+    const res = await fetch("/api/crowdsec/whitelist/entries", {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ value })
+    });
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.error || "Unbekannter Fehler");
+    input.value = "";
+    loadCrowdsecWhitelist();
+  }catch(e){
+    alert(`Hinzufügen fehlgeschlagen: ${e.message}`);
+  }
+}
+document.getElementById("cs-whitelist-add-btn").addEventListener("click", addCrowdsecWhitelistEntry);
+document.getElementById("cs-whitelist-input").addEventListener("keydown", (ev) => {
+  if(ev.key === "Enter"){ ev.preventDefault(); addCrowdsecWhitelistEntry(); }
+});
+
+document.getElementById("cs-whitelist-apply-btn").addEventListener("click", async (ev) => {
+  const btn = ev.currentTarget;
+  if(!confirm("netbird-logparser jetzt neu starten, um die Whitelist-Änderungen zu aktivieren? Kurze Unterbrechung der Log-Verarbeitung.")) return;
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Wird angewendet…";
+  try{
+    const res = await fetch("/api/crowdsec/whitelist/apply", { method: "POST" });
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.error || "Unbekannter Fehler");
+    loadCrowdsecWhitelist();
+  }catch(e){
+    alert(`Anwenden fehlgeschlagen: ${e.message}`);
+  }finally{
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+});
+
 function fmtLag(seconds){
   if(seconds < 90) return `vor ${Math.round(seconds)}s`;
   if(seconds < 3600) return `vor ${Math.round(seconds/60)}min`;
@@ -916,9 +1387,17 @@ async function loadPollerStatus(){
 }
 
 async function refreshAll(){
-  await Promise.all([loadStats(), loadEvents(), loadPollerStatus()]);
+  const tasks = [loadStats(), loadEvents(), loadPollerStatus(), loadCrowdsecCurrent()];
+  if(csHistoryOpen) tasks.push(loadCrowdsecHistory());
+  await Promise.all(tasks);
   document.getElementById("last-update").textContent = "aktualisiert " + new Date().toLocaleTimeString("de-CH", {timeZone: "Europe/Zurich"});
 }
+
+document.querySelectorAll(".jump-nav button[data-jump]").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.getElementById(btn.dataset.jump)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+});
 
 document.querySelectorAll("#range-select button").forEach(btn => {
   btn.addEventListener("click", () => {
@@ -933,6 +1412,19 @@ document.getElementById("f-status").addEventListener("change", (ev) => {
   filters.status = ev.target.value || null;
   renderFilterChips();
   refreshAll();
+});
+document.getElementById("f-bucket").addEventListener("change", (ev) => {
+  filters.bucket = ev.target.value || null;
+  renderFilterChips();
+  refreshAll();
+});
+document.getElementById("f-statuscode").addEventListener("input", (ev) => {
+  clearTimeout(window._sct);
+  window._sct = setTimeout(() => {
+    filters.status_code = ev.target.value.trim() || null;
+    renderFilterChips();
+    refreshAll();
+  }, 300);
 });
 
 // Auto-Refresh pausieren, solange der Tab nicht sichtbar ist (spart API-Last

@@ -1,5 +1,6 @@
 import ipaddress
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -8,7 +9,9 @@ import logging
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 
+import docker as docker_sdk
 import requests
+import yaml
 from flask import Flask, jsonify, request, render_template
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -24,10 +27,29 @@ ANOMALY_DENY_THRESHOLD = int(os.environ.get("ANOMALY_DENY_THRESHOLD", "10"))
 PRUNE_INTERVAL_SECONDS = 3600
 STATS_CACHE_SECONDS = int(os.environ.get("STATS_CACHE_SECONDS", "20"))
 
+# --- CrowdSec (optional) ---
+# Liest Alerts/Entscheidungen der lokalen CrowdSec-Engine, die auch den netbird-proxy
+# Bouncer versorgt (dieselbe LAPI, per Machine-Login statt Bouncer-Key, weil nur die
+# Machine-Rolle Zugriff auf /v1/alerts inkl. GeoIP/AS-Anreicherung hat - der Bouncer-Key
+# sieht nur die blanken, aktiven Decisions ohne Kontext).
+CROWDSEC_API_URL = os.environ.get("CROWDSEC_API_URL", "").rstrip("/")
+CROWDSEC_MACHINE_ID = os.environ.get("CROWDSEC_MACHINE_ID", "")
+CROWDSEC_MACHINE_PASSWORD = os.environ.get("CROWDSEC_MACHINE_PASSWORD", "")
+CROWDSEC_CONFIGURED = bool(CROWDSEC_API_URL and CROWDSEC_MACHINE_ID and CROWDSEC_MACHINE_PASSWORD)
+
+# Lokale Whitelist-Datei von netbird-logparser (Postoverflow-Parser) - read-write
+# gemountet, damit das Whitelist-Widget Eintraege pflegen kann. Wirksam wird eine
+# Aenderung erst nach einem Neustart von WHITELIST_CONTAINER_NAME (CrowdSec liest
+# Parser-Config nur beim Start neu ein), siehe /api/crowdsec/whitelist/apply.
+WHITELIST_FILE_PATH = os.environ.get("WHITELIST_FILE_PATH", "")
+WHITELIST_CONTAINER_NAME = os.environ.get("WHITELIST_CONTAINER_NAME", "netbird-logparser")
+
 if not NB_API_BASE or not NB_API_TOKEN:
     log.warning(
         "NB_API_BASE oder NB_API_TOKEN ist nicht gesetzt - der Poller kann keine Daten abrufen."
     )
+if not CROWDSEC_CONFIGURED:
+    log.info("CROWDSEC_API_URL/MACHINE_ID/MACHINE_PASSWORD nicht gesetzt - CrowdSec-Integration deaktiviert.")
 
 app = Flask(__name__)
 
@@ -36,6 +58,7 @@ app = Flask(__name__)
 # ---------------------------------------------------------------------------
 
 _db_lock = threading.Lock()
+_whitelist_lock = threading.Lock()  # eigener Lock fuer die YAML-Datei, unabhaengig von _db_lock
 
 # /api/stats runs ~15 GROUP BY aggregates over a growing events table (each
 # 100ms-1s on its own); with the 30s auto-refresh and several browser tabs,
@@ -110,6 +133,27 @@ def init_db():
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS crowdsec_alerts (
+            alert_id INTEGER PRIMARY KEY,
+            decision_id INTEGER,
+            created_at TEXT NOT NULL,
+            scenario TEXT,
+            message TEXT,
+            events_count INTEGER,
+            source_ip TEXT,
+            country_code TEXT,
+            as_number TEXT,
+            as_name TEXT,
+            decision_type TEXT,
+            expires_at TEXT
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_crowdsec_created ON crowdsec_alerts(created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_crowdsec_ip ON crowdsec_alerts(source_ip)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_crowdsec_expires ON crowdsec_alerts(expires_at)")
     conn.commit()
     conn.close()
 
@@ -135,20 +179,40 @@ def set_sync_state(key, value):
         conn.close()
 
 
+def log_security_event(e):
+    """Emits one structured stdout line per denied event, so CrowdSec's docker-log
+    acquisition (which already tails netbird-proxy) can also tail this container and
+    catch failed logins / sensitive-path scans - the NetBird proxy's own stdout only
+    logs actual backend connection errors (502s), never blocked/404 requests, so
+    without this CrowdSec had no visibility into denied traffic at all."""
+    log.warning(
+        'security_event source_ip=%s host=%s method=%s path=%s status=%s reason="%s" user_id=%s',
+        e.get("source_ip") or "-",
+        e.get("host") or "-",
+        e.get("method") or "-",
+        e.get("path") or "-",
+        e.get("status_code") if e.get("status_code") is not None else "-",
+        e.get("reason"),
+        e.get("user_id") or "-",
+    )
+
+
 def insert_events(events):
     if not events:
         return
+    newly_inserted = []
     with _db_lock:
         conn = get_conn()
-        conn.executemany(
-            """
-            INSERT OR IGNORE INTO proxy_events (
-                id, service_id, timestamp, method, host, path, duration_ms, status_code,
-                source_ip, reason, user_id, auth_method_used, country_code, city_name,
-                subdivision_code, bytes_upload, bytes_download, protocol, metadata
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
+        cur = conn.cursor()
+        for e in events:
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO proxy_events (
+                    id, service_id, timestamp, method, host, path, duration_ms, status_code,
+                    source_ip, reason, user_id, auth_method_used, country_code, city_name,
+                    subdivision_code, bytes_upload, bytes_download, protocol, metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
                 (
                     e.get("id"),
                     e.get("service_id"),
@@ -169,12 +233,16 @@ def insert_events(events):
                     e.get("bytes_download"),
                     e.get("protocol"),
                     json.dumps(e.get("metadata")) if e.get("metadata") is not None else None,
-                )
-                for e in events
-            ],
-        )
+                ),
+            )
+            if cur.rowcount:
+                newly_inserted.append(e)
         conn.commit()
         conn.close()
+
+    for e in newly_inserted:
+        if e.get("reason"):
+            log_security_event(e)
 
 
 def prune_old_events():
@@ -204,6 +272,152 @@ def prune_old_events():
     set_sync_state("last_prune_at", now.isoformat())
     if deleted:
         log.info("Aufbewahrung: %d Events aelter als %d Tage geloescht", deleted, RETENTION_DAYS)
+
+
+# ---------------------------------------------------------------------------
+# CrowdSec sync
+# ---------------------------------------------------------------------------
+
+_GO_DURATION_RE = re.compile(r"^(-?)(?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)?$")
+
+
+def parse_go_duration_seconds(value):
+    """Parst Go-Duration-Strings, wie CrowdSec sie in decisions[].duration liefert
+    (z.B. '23h31m14s' fuer eine noch aktive Entscheidung, '-80h34m27s' fuer eine
+    bereits abgelaufene). Gibt None bei leerem/unbekanntem Format zurueck."""
+    if not value:
+        return None
+    m = _GO_DURATION_RE.match(value.strip())
+    if not m:
+        return None
+    sign, h, mn, sec = m.groups()
+    total = (int(h) if h else 0) * 3600 + (int(mn) if mn else 0) * 60 + (float(sec) if sec else 0)
+    return -total if sign else total
+
+
+_crowdsec_token = {"value": None, "expires_at": 0}
+
+
+def crowdsec_login():
+    resp = requests.post(
+        f"{CROWDSEC_API_URL}/v1/watchers/login",
+        json={"machine_id": CROWDSEC_MACHINE_ID, "password": CROWDSEC_MACHINE_PASSWORD},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    _crowdsec_token["value"] = data["token"]
+    # 60s Sicherheitsmarge vor dem eigentlichen Ablauf, damit ein Request nicht
+    # mitten in der Bearbeitung auf einen gerade abgelaufenen Token trifft.
+    _crowdsec_token["expires_at"] = datetime.fromisoformat(data["expire"]).timestamp() - 60
+    return _crowdsec_token["value"]
+
+
+def crowdsec_token():
+    if _crowdsec_token["value"] and time.time() < _crowdsec_token["expires_at"]:
+        return _crowdsec_token["value"]
+    return crowdsec_login()
+
+
+def sync_crowdsec():
+    """Holt alle Alerts (inkl. GeoIP/AS-Anreicherung und zugehoeriger Ban-Decision)
+    von der zentralen CrowdSec-LAPI und spiegelt sie lokal. Noetig, weil CrowdSec
+    selbst nur ~7 Tage Historie haelt (flush.max_age) - ohne eigene Kopie waere
+    "welche IP wurde wann und wieso geblockt" nach ein paar Tagen nicht mehr
+    beantwortbar. Der Bouncer-Key (den netbird-proxy fuers Blocken nutzt) sieht nur
+    die blanken aktiven Decisions ohne Kontext, daher hier Machine-Login wie der
+    netbird-logparser-Agent."""
+    if not CROWDSEC_CONFIGURED:
+        return
+    resp = requests.get(
+        f"{CROWDSEC_API_URL}/v1/alerts",
+        params={"scope": "Ip"},
+        headers={"Authorization": f"Bearer {crowdsec_token()}"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    alerts = resp.json() or []
+
+    now = datetime.now(timezone.utc)
+    rows = []
+    for a in alerts:
+        decisions = a.get("decisions") or []
+        decision = decisions[0] if decisions else {}
+        remaining = parse_go_duration_seconds(decision.get("duration"))
+        expires_at = (
+            (now + timedelta(seconds=remaining)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if remaining is not None else None
+        )
+        source = a.get("source") or {}
+        rows.append((
+            a.get("id"),
+            decision.get("id"),
+            a.get("created_at"),
+            a.get("scenario"),
+            a.get("message"),
+            a.get("events_count"),
+            source.get("ip"),
+            source.get("cn"),
+            source.get("as_number"),
+            source.get("as_name"),
+            decision.get("type"),
+            expires_at,
+        ))
+
+    if not rows:
+        return
+    with _db_lock:
+        conn = get_conn()
+        conn.executemany(
+            """
+            INSERT INTO crowdsec_alerts (
+                alert_id, decision_id, created_at, scenario, message, events_count,
+                source_ip, country_code, as_number, as_name, decision_type, expires_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(alert_id) DO UPDATE SET
+                decision_id = excluded.decision_id,
+                expires_at = excluded.expires_at,
+                events_count = excluded.events_count,
+                message = excluded.message
+            """,
+            rows,
+        )
+        conn.commit()
+        conn.close()
+    set_sync_state("crowdsec_last_sync_at", now.isoformat())
+
+
+def crowdsec_delete_decision(decision_id):
+    """Loescht eine einzelne Entscheidung (Unban) ueber die CrowdSec-LAPI.
+    Nutzt denselben Machine-Login wie sync_crowdsec()."""
+    resp = requests.delete(
+        f"{CROWDSEC_API_URL}/v1/decisions/{decision_id}",
+        headers={"Authorization": f"Bearer {crowdsec_token()}"},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def read_whitelist_file():
+    with open(WHITELIST_FILE_PATH, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    whitelist = data.setdefault("whitelist", {})
+    whitelist.setdefault("ip", [])
+    whitelist.setdefault("cidr", [])
+    return data
+
+
+def write_whitelist_file(data):
+    # WHITELIST_FILE_PATH ist ein einzeln gebindmounteter Pfad (nicht nur das
+    # Elternverzeichnis) - das macht ihn selbst zum Mountpoint, weshalb der sonst
+    # uebliche "in Temp-Datei schreiben + os.replace()" Trick hier mit
+    # "Device or resource busy" scheitert (ein Rename kann einen Mountpoint nicht
+    # ersetzen). Also direkt in die bestehende Datei schreiben (trunkieren).
+    with open(WHITELIST_FILE_PATH, "w", encoding="utf-8") as f:
+        yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+        f.flush()
+        os.fsync(f.fileno())
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +495,10 @@ def poller_loop():
                 poll_once()
             except Exception:
                 log.exception("Unerwarteter Fehler im Poller")
+        try:
+            sync_crowdsec()
+        except Exception:
+            log.exception("Unerwarteter Fehler beim CrowdSec-Sync")
         try:
             prune_old_events()
         except Exception:
@@ -413,6 +631,25 @@ def label_city(raw_city, source_ip):
     return UNKNOWN_CITY_LABEL
 
 
+SEARCH_FIELDS = ("host", "path", "source_ip", "user_id")
+
+
+def apply_search(search, where_clauses, params, fields=SEARCH_FIELDS):
+    """Freitextsuche ueber `fields` (Leerzeichen-getrennte Tokens).
+    Ein Token mit '!'-Praefix schliesst Treffer aus (z.B. "!10.0.0.5", um eine
+    laute IP aus der Tabelle herauszufiltern), alle anderen Tokens muessen in
+    mindestens einem der Felder vorkommen (UND ueber Tokens, ODER ueber Felder)."""
+    for token in search.split():
+        negate = len(token) > 1 and token.startswith("!")
+        term = token[1:] if negate else token
+        if not term:
+            continue
+        like = f"%{term}%"
+        clause = "(" + " OR ".join(f"{f} LIKE ?" for f in fields) + ")"
+        where_clauses.append(f"NOT {clause}" if negate else clause)
+        params.extend([like] * len(fields))
+
+
 def apply_common_filters(args, where_clauses, params):
     """Cross-filter conditions shared by /api/stats and /api/events.
 
@@ -456,6 +693,13 @@ def apply_common_filters(args, where_clauses, params):
         where_clauses.append("(reason IS NULL OR reason = '')")
     if bucket in BUCKET_CONDITIONS:
         where_clauses.append(BUCKET_CONDITIONS[bucket])
+    status_code = args.get("status_code", "").strip()
+    if status_code:
+        try:
+            where_clauses.append("status_code = ?")
+            params.append(int(status_code))
+        except ValueError:
+            pass  # nicht-numerische Eingabe wird ignoriert statt einen 500er zu werfen
     if reason:
         where_clauses.append("reason = ?")
         params.append(reason)
@@ -492,6 +736,28 @@ def index():
 @app.route("/healthz")
 def healthz():
     return jsonify(status="ok")
+
+
+@app.route("/manifest.webmanifest")
+def manifest():
+    """Web App Manifest, damit Chromium/Vanadium (Android) 'Zum Startbildschirm
+    hinzufuegen' als eigenstaendige App ohne Adressleiste startet statt als
+    normaler Browser-Tab."""
+    return jsonify(
+        name="NetBird Proxy Access Dashboard",
+        short_name="Proxy Dashboard",
+        description="Zugriffs- und CrowdSec-Uebersicht fuer den NetBird Reverse Proxy",
+        start_url="/",
+        scope="/",
+        display="standalone",
+        background_color="#0d1117",
+        theme_color="#0d1117",
+        lang="de",
+        icons=[
+            {"src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+            {"src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
+        ],
+    ), 200, {"Content-Type": "application/manifest+json"}
 
 
 @app.route("/api/stats")
@@ -681,9 +947,7 @@ def api_events():
         where_clauses.append("timestamp >= ?")
         params.append(cutoff)
     if search:
-        where_clauses.append("(host LIKE ? OR path LIKE ? OR source_ip LIKE ? OR user_id LIKE ?)")
-        like = f"%{search}%"
-        params.extend([like, like, like, like])
+        apply_search(search, where_clauses, params)
     apply_common_filters(request.args, where_clauses, params)
 
     where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
@@ -712,6 +976,224 @@ def api_events():
     return jsonify(events=events)
 
 
+CROWDSEC_SEARCH_FIELDS = ("source_ip", "scenario", "message", "country_code", "as_name")
+
+
+@app.route("/api/crowdsec/current")
+def api_crowdsec_current():
+    """Aktueller Block-Status: alle lokal bekannten CrowdSec-Bans, deren berechnetes
+    Ablaufdatum noch in der Zukunft liegt - das "wer ist JETZT gerade blockiert".
+    Pro IP zu einer Zeile zusammengefasst, weil dieselbe IP oft mehrere Szenarien
+    gleichzeitig ausloest (z.B. auth-bruteforce + sensitive-path-scan)."""
+    conn = get_conn()
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    rows = conn.execute(
+        """
+        SELECT * FROM crowdsec_alerts
+        WHERE expires_at IS NOT NULL AND expires_at > ?
+        ORDER BY created_at ASC
+        """,
+        (now,),
+    ).fetchall()
+    conn.close()
+
+    by_ip = {}
+    for r in rows:
+        ip = r["source_ip"]
+        entry = by_ip.get(ip)
+        if entry is None:
+            entry = {
+                "source_ip": ip,
+                "country_code": r["country_code"],
+                "as_name": r["as_name"],
+                "as_number": r["as_number"],
+                "scenarios": [],
+                "events_count": 0,
+                "first_seen": r["created_at"],
+                "last_seen": r["created_at"],
+                "expires_at": r["expires_at"],
+            }
+            by_ip[ip] = entry
+        if r["scenario"] not in entry["scenarios"]:
+            entry["scenarios"].append(r["scenario"])
+        entry["events_count"] += r["events_count"] or 0
+        entry["last_seen"] = max(entry["last_seen"], r["created_at"])
+        entry["expires_at"] = max(entry["expires_at"], r["expires_at"])
+
+    decisions = sorted(by_ip.values(), key=lambda d: d["last_seen"], reverse=True)
+    return jsonify(configured=CROWDSEC_CONFIGURED, decisions=decisions)
+
+
+@app.route("/api/crowdsec/history")
+def api_crowdsec_history():
+    """Verlauf aller je gesehenen CrowdSec-Bans (auch abgelaufene) - haelt laenger
+    vor als CrowdSecs eigene ~7-Tage-Historie, siehe sync_crowdsec()."""
+    range_key = request.args.get("range", "24h")
+    cutoff = range_cutoff(range_key)
+    search = request.args.get("search", "").strip()
+    limit = min(int(request.args.get("limit", "200")), 500)
+
+    where_clauses, params = [], []
+    if cutoff:
+        where_clauses.append("created_at >= ?")
+        params.append(cutoff)
+    if search:
+        apply_search(search, where_clauses, params, fields=CROWDSEC_SEARCH_FIELDS)
+
+    where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    conn = get_conn()
+    rows = conn.execute(
+        f"""
+        SELECT *, (expires_at IS NOT NULL AND expires_at > ?) AS is_active
+        FROM crowdsec_alerts
+        {where_sql}
+        ORDER BY created_at DESC
+        LIMIT ?
+        """,
+        [now] + params + [limit],
+    ).fetchall()
+    conn.close()
+    return jsonify(configured=CROWDSEC_CONFIGURED, alerts=[dict(r) for r in rows])
+
+
+@app.route("/api/crowdsec/ban/<ip>", methods=["DELETE"])
+def api_crowdsec_delete_ban(ip):
+    """Loescht alle aktuell aktiven Entscheidungen einer IP (Unban) - fuer den
+    Fall, dass sie irrtuemlich blockiert wurde. Wirkt sofort auf der LAPI; die
+    lokale Kopie wird direkt mitaktualisiert, statt auf den naechsten Sync-Zyklus
+    zu warten, damit das Widget die IP nicht mehr als aktiv blockiert zeigt."""
+    if not CROWDSEC_CONFIGURED:
+        return jsonify(error="CrowdSec ist nicht konfiguriert"), 400
+
+    conn = get_conn()
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    rows = conn.execute(
+        """
+        SELECT decision_id FROM crowdsec_alerts
+        WHERE source_ip = ? AND decision_id IS NOT NULL AND expires_at IS NOT NULL AND expires_at > ?
+        """,
+        (ip, now),
+    ).fetchall()
+    conn.close()
+
+    deleted, errors = [], []
+    for r in rows:
+        decision_id = r["decision_id"]
+        try:
+            crowdsec_delete_decision(decision_id)
+            deleted.append(decision_id)
+        except requests.RequestException as exc:
+            errors.append(str(exc))
+
+    if deleted:
+        placeholders = ",".join("?" * len(deleted))
+        with _db_lock:
+            conn = get_conn()
+            conn.execute(
+                f"UPDATE crowdsec_alerts SET expires_at = ? WHERE source_ip = ? AND decision_id IN ({placeholders})",
+                [now, ip] + deleted,
+            )
+            conn.commit()
+            conn.close()
+
+    if errors and not deleted:
+        return jsonify(error="; ".join(errors)), 502
+    return jsonify(ok=True, deleted_decision_ids=deleted, errors=errors)
+
+
+@app.route("/api/crowdsec/whitelist")
+def api_crowdsec_whitelist_get():
+    if not WHITELIST_FILE_PATH:
+        return jsonify(configured=False, ip=[], cidr=[], dirty=False)
+    try:
+        data = read_whitelist_file()
+    except OSError as exc:
+        log.warning("Whitelist-Datei nicht lesbar: %s", exc)
+        return jsonify(configured=False, error=str(exc), ip=[], cidr=[], dirty=False)
+    dirty = get_sync_state("whitelist_dirty") == "1"
+    return jsonify(configured=True, ip=data["whitelist"]["ip"], cidr=data["whitelist"]["cidr"], dirty=dirty)
+
+
+@app.route("/api/crowdsec/whitelist/entries", methods=["POST"])
+def api_crowdsec_whitelist_add():
+    if not WHITELIST_FILE_PATH:
+        return jsonify(error="Whitelist-Datei nicht konfiguriert"), 400
+    value = ((request.get_json(silent=True) or {}).get("value") or "").strip()
+    if not value:
+        return jsonify(error="Kein Wert angegeben"), 400
+
+    kind = "cidr" if "/" in value else "ip"
+    try:
+        if kind == "ip":
+            ipaddress.ip_address(value)
+        else:
+            ipaddress.ip_network(value, strict=False)
+    except ValueError:
+        return jsonify(error=f"'{value}' ist keine gueltige IP-Adresse oder CIDR-Range"), 400
+
+    with _whitelist_lock:
+        try:
+            data = read_whitelist_file()
+        except OSError as exc:
+            return jsonify(error=str(exc)), 500
+        entries = data["whitelist"][kind]
+        if value not in entries:
+            entries.append(value)
+            write_whitelist_file(data)
+            set_sync_state("whitelist_dirty", "1")
+
+    return jsonify(configured=True, ip=data["whitelist"]["ip"], cidr=data["whitelist"]["cidr"], dirty=True)
+
+
+@app.route("/api/crowdsec/whitelist/entries", methods=["DELETE"])
+def api_crowdsec_whitelist_remove():
+    if not WHITELIST_FILE_PATH:
+        return jsonify(error="Whitelist-Datei nicht konfiguriert"), 400
+    value = (request.args.get("value") or "").strip()
+    if not value:
+        return jsonify(error="Kein Wert angegeben"), 400
+
+    with _whitelist_lock:
+        try:
+            data = read_whitelist_file()
+        except OSError as exc:
+            return jsonify(error=str(exc)), 500
+        changed = False
+        for kind in ("ip", "cidr"):
+            if value in data["whitelist"][kind]:
+                data["whitelist"][kind].remove(value)
+                changed = True
+        if changed:
+            write_whitelist_file(data)
+            set_sync_state("whitelist_dirty", "1")
+
+    dirty = get_sync_state("whitelist_dirty") == "1"
+    return jsonify(configured=True, ip=data["whitelist"]["ip"], cidr=data["whitelist"]["cidr"], dirty=dirty)
+
+
+@app.route("/api/crowdsec/whitelist/apply", methods=["POST"])
+def api_crowdsec_whitelist_apply():
+    """Startet WHITELIST_CONTAINER_NAME (netbird-logparser) neu, damit eine
+    geaenderte Whitelist-Datei tatsaechlich geladen wird - CrowdSec liest
+    Postoverflow-Parser nur beim Start ein, kein Hot-Reload. Bewusst ein
+    separater, vom Nutzer ausgeloester Schritt statt automatisch bei jeder
+    Aenderung, damit der (kurze) Neustart der Log-Verarbeitung kontrolliert
+    passiert und nicht bei jedem Klick."""
+    if not WHITELIST_FILE_PATH:
+        return jsonify(error="Whitelist-Datei nicht konfiguriert"), 400
+    try:
+        client = docker_sdk.from_env()
+        container = client.containers.get(WHITELIST_CONTAINER_NAME)
+        container.restart(timeout=10)
+    except Exception as exc:
+        log.exception("Neustart von %s fehlgeschlagen", WHITELIST_CONTAINER_NAME)
+        return jsonify(error=str(exc)), 502
+    set_sync_state("whitelist_dirty", "0")
+    return jsonify(ok=True)
+
+
 @app.route("/api/poller-status")
 def api_poller_status():
     conn = get_conn()
@@ -732,6 +1214,16 @@ def api_poller_status():
     except OSError:
         db_size_bytes = None
 
+    crowdsec_last_sync = get_sync_state("crowdsec_last_sync_at")
+    crowdsec_lag_seconds = None
+    if crowdsec_last_sync:
+        try:
+            crowdsec_lag_seconds = max(
+                0, (datetime.now(timezone.utc) - datetime.fromisoformat(crowdsec_last_sync)).total_seconds()
+            )
+        except ValueError:
+            pass
+
     return jsonify(
         last_timestamp=last_timestamp,
         lag_seconds=lag_seconds,
@@ -739,6 +1231,8 @@ def api_poller_status():
         retention_days=RETENTION_DAYS,
         poller_configured=bool(NB_API_BASE and NB_API_TOKEN),
         db_size_bytes=db_size_bytes,
+        crowdsec_configured=CROWDSEC_CONFIGURED,
+        crowdsec_lag_seconds=crowdsec_lag_seconds,
     )
 
 
