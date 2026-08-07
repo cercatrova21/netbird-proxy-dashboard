@@ -145,6 +145,8 @@ All configuration is via environment variables (see `.env.example`).
 | `CROWDSEC_MACHINE_PASSWORD` | *(empty)* | Machine account password for the above. |
 | `WHITELIST_HOST_FILE_PATH` | *(empty)* | Host path to the CrowdSec whitelist YAML file the dashboard should manage. Leave empty to hide the whitelist widget. |
 | `WHITELIST_CONTAINER_NAME` | `netbird-logparser` | Name of the CrowdSec container to restart when you click "Apply" after editing the whitelist. |
+| `ASN_ENRICHMENT_ENABLED` | `false` | Enrich every request with its source IP's AS number/org (adds a "Top ASNs" chart + `asn` filter). Downloads the free, unauthenticated GeoLite2-ASN database CrowdSec's own hub also uses - opt-in since it's the only feature here that fetches something from the internet on its own. |
+| `ASN_MMDB_URL` | CrowdSec's public mirror | Override if you'd rather point at your own MaxMind-licensed mirror. |
 
 ## CrowdSec integration (optional)
 
