@@ -10,6 +10,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 
 import docker as docker_sdk
+import maxminddb
 import requests
 import yaml
 from flask import Flask, jsonify, request, render_template
@@ -44,12 +45,31 @@ CROWDSEC_CONFIGURED = bool(CROWDSEC_API_URL and CROWDSEC_MACHINE_ID and CROWDSEC
 WHITELIST_FILE_PATH = os.environ.get("WHITELIST_FILE_PATH", "")
 WHITELIST_CONTAINER_NAME = os.environ.get("WHITELIST_CONTAINER_NAME", "netbird-logparser")
 
+# --- ASN-Anreicherung (optional) ---
+# Reichert jedes Event um Autonomous-System-Nummer/-Name der Quell-IP an, per
+# lokaler MaxMind-GeoLite2-ASN-Datenbank - demselben kostenlosen Download, den
+# CrowdSecs eigene Hub-Parser verwenden (kein MaxMind-Account noetig). Bewusst
+# per Default AUS: das ist die einzige Integration hier, die selbststaendig
+# etwas aus dem Internet nachlaedt, und dieses Repo wird auch als oeffentliches
+# Self-Hosting-Template verteilt (siehe crowdsec/README.md) - Selbsthoster ohne
+# Interesse an ASN-Daten sollen nicht ungefragt einen neuen externen Download
+# bekommen. ASN_MMDB_URL ist bewusst ueberschreibbar, falls der oeffentliche
+# CrowdSec-Mirror mal verschwindet und jemand einen eigenen MaxMind-Download nutzen will.
+ASN_ENRICHMENT_ENABLED = os.environ.get("ASN_ENRICHMENT_ENABLED", "false").lower() == "true"
+ASN_MMDB_URL = os.environ.get(
+    "ASN_MMDB_URL", "https://hub-data.crowdsec.net/mmdb_update/GeoLite2-ASN.mmdb"
+)
+ASN_MMDB_PATH = os.path.join(os.path.dirname(DB_PATH) or ".", "GeoLite2-ASN.mmdb")
+ASN_REFRESH_INTERVAL_SECONDS = 7 * 24 * 3600  # woechentlich, wie CrowdSecs eigener Hub-Refresh
+
 if not NB_API_BASE or not NB_API_TOKEN:
     log.warning(
         "NB_API_BASE oder NB_API_TOKEN ist nicht gesetzt - der Poller kann keine Daten abrufen."
     )
 if not CROWDSEC_CONFIGURED:
     log.info("CROWDSEC_API_URL/MACHINE_ID/MACHINE_PASSWORD nicht gesetzt - CrowdSec-Integration deaktiviert.")
+if ASN_ENRICHMENT_ENABLED:
+    log.info("ASN-Anreicherung aktiviert - laedt bei Bedarf %s", ASN_MMDB_URL)
 
 app = Flask(__name__)
 
@@ -90,6 +110,17 @@ def get_conn():
     return conn
 
 
+def migrate_schema(conn):
+    """One place for schema changes made after the initial CREATE TABLE -
+    idempotent, checked via PRAGMA table_info() rather than a version number
+    table, since this is currently the only migration this app has ever needed."""
+    existing_columns = {row["name"] for row in conn.execute("PRAGMA table_info(proxy_events)")}
+    if "as_number" not in existing_columns:
+        conn.execute("ALTER TABLE proxy_events ADD COLUMN as_number TEXT")
+    if "as_name" not in existing_columns:
+        conn.execute("ALTER TABLE proxy_events ADD COLUMN as_name TEXT")
+
+
 def init_db():
     conn = get_conn()
     conn.execute(
@@ -125,6 +156,8 @@ def init_db():
     # Deckt die "neues Land"-Anomalie-Query ab: MIN(timestamp) GROUP BY country_code
     # kann so per Index-Skip pro Gruppe beantwortet werden statt die Tabelle voll zu scannen.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_country_ts ON proxy_events(country_code, timestamp)")
+    migrate_schema(conn)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_as_number ON proxy_events(as_number)")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS sync_state (
@@ -205,13 +238,15 @@ def insert_events(events):
         conn = get_conn()
         cur = conn.cursor()
         for e in events:
+            as_number, as_name = lookup_asn(e.get("source_ip"))
             cur.execute(
                 """
                 INSERT OR IGNORE INTO proxy_events (
                     id, service_id, timestamp, method, host, path, duration_ms, status_code,
                     source_ip, reason, user_id, auth_method_used, country_code, city_name,
-                    subdivision_code, bytes_upload, bytes_download, protocol, metadata
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    subdivision_code, bytes_upload, bytes_download, protocol, metadata,
+                    as_number, as_name
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     e.get("id"),
@@ -233,6 +268,8 @@ def insert_events(events):
                     e.get("bytes_download"),
                     e.get("protocol"),
                     json.dumps(e.get("metadata")) if e.get("metadata") is not None else None,
+                    as_number,
+                    as_name,
                 ),
             )
             if cur.rowcount:
@@ -243,6 +280,47 @@ def insert_events(events):
     for e in newly_inserted:
         if e.get("reason"):
             log_security_event(e)
+
+
+def backfill_asn_data():
+    """insert_events() only enriches NEW events going forward - without this,
+    historical rows (and therefore 'Top ASNs' for anything wider than a fresh
+    install) would stay blank for a long time. Runs once at startup in its
+    own thread; a cheap no-op on every later restart once everything's
+    filled in. Deduped to unique source_ip first (a handful of thousand, not
+    every row) and updated via the existing source_ip index, so it doesn't
+    need a full-table scan - small per-IP transactions under _db_lock rather
+    than one lock for the whole run, so it doesn't starve the poller."""
+    if not ASN_ENRICHMENT_ENABLED:
+        return
+    try:
+        conn = get_conn()
+        ips = [
+            r["source_ip"]
+            for r in conn.execute(
+                "SELECT DISTINCT source_ip FROM proxy_events WHERE as_number IS NULL AND source_ip IS NOT NULL"
+            )
+        ]
+        if not ips:
+            conn.close()
+            return
+        log.info("ASN-Backfill: %d eindeutige Quell-IPs ohne ASN-Daten gefunden", len(ips))
+        updated = 0
+        for ip in ips:
+            as_number, as_name = lookup_asn(ip)
+            if as_number is None and as_name is None:
+                continue
+            with _db_lock:
+                conn.execute(
+                    "UPDATE proxy_events SET as_number = ?, as_name = ? WHERE source_ip = ? AND as_number IS NULL",
+                    (as_number, as_name, ip),
+                )
+                conn.commit()
+            updated += 1
+        conn.close()
+        log.info("ASN-Backfill abgeschlossen: %d/%d IPs angereichert", updated, len(ips))
+    except Exception:
+        log.exception("ASN-Backfill fehlgeschlagen")
 
 
 def prune_old_events():
@@ -503,6 +581,10 @@ def poller_loop():
             prune_old_events()
         except Exception:
             log.exception("Unerwarteter Fehler beim Pruning")
+        try:
+            ensure_asn_db()  # No-op fast path, prueft nur den mtime der lokalen Datei
+        except Exception:
+            log.exception("Unerwarteter Fehler bei der ASN-Datenbank-Aktualisierung")
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
@@ -644,6 +726,77 @@ def is_netbird_mesh_ip(ip):
         return False
 
 
+_asn_reader = None  # lazily geoeffnet; False = Oeffnen ist fehlgeschlagen, nicht erneut versuchen
+_asn_reader_lock = threading.Lock()
+
+
+def ensure_asn_db():
+    """Laedt die (kostenlose, unauthentifizierte) GeoLite2-ASN-mmdb, die auch
+    CrowdSecs eigene Hub-Parser nutzen, in denselben Volume-Pfad wie die SQLite-
+    DB - falls die Anreicherung aktiviert ist und noch keine/eine veraltete
+    Kopie vorliegt. Jeder Fehlerfall (Netzwerk, Platte, kaputter Download) wird
+    nur geloggt - blockiert nie den Start und wirft nie aus dem Poller-Loop."""
+    if not ASN_ENRICHMENT_ENABLED:
+        return
+    try:
+        needs_download = not os.path.exists(ASN_MMDB_PATH)
+        if not needs_download:
+            age_seconds = time.time() - os.path.getmtime(ASN_MMDB_PATH)
+            needs_download = age_seconds >= ASN_REFRESH_INTERVAL_SECONDS
+        if not needs_download:
+            return
+
+        tmp_path = ASN_MMDB_PATH + ".tmp"
+        resp = requests.get(ASN_MMDB_URL, timeout=60)
+        resp.raise_for_status()
+        with open(tmp_path, "wb") as f:
+            f.write(resp.content)
+
+        maxminddb.open_database(tmp_path).close()  # wirft bei kaputter/unvollstaendiger Datei
+        os.replace(tmp_path, ASN_MMDB_PATH)  # atomar - ueberschreibt eine funktionierende Datei nur nach Erfolg
+        global _asn_reader
+        with _asn_reader_lock:
+            _asn_reader = None  # naechster lookup_asn() oeffnet die frische Datei neu
+        log.info("ASN-Datenbank aktualisiert (%s)", ASN_MMDB_URL)
+    except Exception:
+        log.exception("ASN-Datenbank konnte nicht aktualisiert werden - ASN-Anreicherung bleibt ggf. inaktiv")
+
+
+def _get_asn_reader():
+    global _asn_reader
+    if not ASN_ENRICHMENT_ENABLED:
+        return None
+    with _asn_reader_lock:
+        if _asn_reader is None and os.path.exists(ASN_MMDB_PATH):
+            try:
+                _asn_reader = maxminddb.open_database(ASN_MMDB_PATH)
+            except Exception:
+                log.exception("ASN-Datenbank konnte nicht geoeffnet werden")
+                _asn_reader = False
+        return _asn_reader or None
+
+
+def lookup_asn(ip):
+    """(as_number, as_name) fuer eine oeffentliche IP, sonst (None, None) -
+    Anreicherung deaktiviert, IP privat/NetBird-Mesh, DB nicht geladen, oder
+    IP schlicht nicht gefunden. Jeder Aufrufer muss (None, None) dauerhaft
+    tolerieren, auch bei komplett deaktiviertem Feature."""
+    if not ip or is_private_ip(ip) or is_netbird_mesh_ip(ip):
+        return None, None
+    reader = _get_asn_reader()
+    if not reader:
+        return None, None
+    try:
+        result = reader.get(ip)
+    except (ValueError, maxminddb.InvalidDatabaseError):
+        return None, None
+    if not result:
+        return None, None
+    as_number = result.get("autonomous_system_number")
+    as_name = result.get("autonomous_system_organization")
+    return (str(as_number) if as_number is not None else None), as_name
+
+
 def label_country(raw_country, source_ip):
     if raw_country:
         return raw_country
@@ -692,6 +845,7 @@ def apply_common_filters(args, where_clauses, params):
     host = args.get("host", "").strip()
     country = args.get("country", "").strip()
     ip = args.get("ip", "").strip()
+    asn = args.get("asn", "").strip()
     status = args.get("status", "").strip()  # allowed/denied (reason-based)
     bucket = args.get("bucket", "").strip()  # 2xx/3xx/4xx/5xx/n/a (status_code-based)
     reason = args.get("reason", "").strip()
@@ -720,6 +874,9 @@ def apply_common_filters(args, where_clauses, params):
     if ip:
         where_clauses.append("source_ip = ?")
         params.append(ip)
+    if asn:
+        where_clauses.append("as_number = ?")
+        params.append(asn)
     if status == "denied":
         where_clauses.append("(reason IS NOT NULL AND reason != '')")
     elif status == "allowed":
@@ -855,7 +1012,7 @@ def _compute_stats(args):
         f"""
         SELECT country_code, host, path, city_name, source_ip, duration_ms,
                bytes_upload, bytes_download, reason, user_id, auth_method_used,
-               status_code, timestamp, metadata
+               status_code, timestamp, metadata, as_number, as_name
         FROM proxy_events {where}
         """,
         params,
@@ -863,6 +1020,7 @@ def _compute_stats(args):
     conn.row_factory = sqlite3.Row
 
     countries, hosts, paths, cities, ips = Counter(), Counter(), Counter(), Counter(), Counter()
+    asns = Counter()
     users, auth_methods_c, reasons_c, status_buckets_c = Counter(), Counter(), Counter(), Counter()
     denies_by_ip = Counter()
     traffic_by_host = defaultdict(lambda: [0, 0])
@@ -878,7 +1036,7 @@ def _compute_stats(args):
 
     for (raw_country, raw_host, path, raw_city, source_ip, duration_ms,
          bytes_upload, bytes_download, reason, user_id, auth_method_used,
-         status_code, timestamp, metadata) in rows:
+         status_code, timestamp, metadata, as_number, as_name) in rows:
         country_code = label_country(raw_country, source_ip)
         host = raw_host or UNKNOWN_HOST_LABEL
         city = label_city(raw_city, source_ip)
@@ -890,6 +1048,8 @@ def _compute_stats(args):
         cities[(city, country_code)] += 1
         if source_ip is not None:
             ips[source_ip] += 1
+        if as_number is not None:
+            asns[(as_number, as_name)] += 1
 
         up, down = bytes_upload or 0, bytes_download or 0
         host_traffic = traffic_by_host[host]
@@ -1057,6 +1217,7 @@ def _compute_stats(args):
         top_paths=[{"host": h, "path": p, "c": v} for (h, p), v in paths.most_common(10)],
         top_cities=[{"city_name": c, "country_code": cc, "c": v} for (c, cc), v in cities.most_common(10)],
         top_ips=[{"source_ip": k, "c": v} for k, v in ips.most_common(10)],
+        top_asns=[{"as_number": k[0], "as_name": k[1], "c": v} for k, v in asns.most_common(10)],
         latency=dict(p50=latency_p50, p95=latency_p95, avg=latency_avg),
         latency_timeseries=latency_timeseries,
         slowest_events=slowest_events,
@@ -1392,6 +1553,7 @@ def api_poller_status():
 
 if __name__ == "__main__":
     init_db()
-    t = threading.Thread(target=poller_loop, daemon=True)
-    t.start()
+    ensure_asn_db()
+    threading.Thread(target=poller_loop, daemon=True).start()
+    threading.Thread(target=backfill_asn_data, daemon=True).start()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8098")))

@@ -494,6 +494,11 @@
     </div>
   </div>
 
+  <div class="card" style="margin-bottom:14px;" id="card-asns">
+    <h2>Top ASNs</h2>
+    <canvas id="chart-asns"></canvas>
+  </div>
+
   <div class="grid2">
     <div class="card">
       <h2>Top User</h2>
@@ -542,7 +547,7 @@ let charts = {};
 
 // Cross-filter state: clicking a chart segment or table cell sets one of these,
 // which is then applied to every panel (KPIs, charts, table) simultaneously.
-let filters = { host: null, country: null, ip: null, status: null, bucket: null, status_code: null, reason: null, path: null, city: null, user_id: null };
+let filters = { host: null, country: null, ip: null, asn: null, asn_label: null, status: null, bucket: null, status_code: null, reason: null, path: null, city: null, user_id: null };
 
 // Filter-Keys, die ein eigenes Steuerelement in der "Filter (gesamte Seite)"-Zeile
 // haben - beim Setzen/Loeschen per Chart-Klick oder Chip-X muss deren Wert im UI
@@ -646,6 +651,7 @@ function clearFilter(key){
     resetToDefaultRange();
   } else {
     filters[key] = null;
+    if(key === "asn") filters.asn_label = null;
     syncFilterInput(key);
   }
   renderFilterChips();
@@ -665,6 +671,7 @@ function renderFilterChips(){
   if(filters.country) chips.push(chipHtml("country", "Land", countryLabel(filters.country)));
   if(filters.host) chips.push(chipHtml("host", "Host", filters.host));
   if(filters.ip) chips.push(chipHtml("ip", "IP", filters.ip));
+  if(filters.asn) chips.push(chipHtml("asn", "ASN", `AS${filters.asn} ${escapeHtml(filters.asn_label || "")}`));
   if(filters.status) chips.push(chipHtml("status", "Status", STATUS_LABELS[filters.status] || filters.status));
   if(filters.bucket) chips.push(chipHtml("bucket", "Code-Bereich", BUCKET_LABELS[filters.bucket] || filters.bucket));
   if(filters.status_code) chips.push(chipHtml("status_code", "Code", filters.status_code));
@@ -684,6 +691,7 @@ function appendFilterParams(params){
   if(filters.host) params.set("host", filters.host);
   if(filters.country) params.set("country", filters.country);
   if(filters.ip) params.set("ip", filters.ip);
+  if(filters.asn) params.set("asn", filters.asn);
   if(filters.status) params.set("status", filters.status);
   if(filters.bucket) params.set("bucket", filters.bucket);
   if(filters.status_code) params.set("status_code", filters.status_code);
@@ -1112,6 +1120,25 @@ async function loadStats(){
     options: baseOptions({ indexAxis:"y", plugins:{legend:{display:false}}, onClick: (evt, elements) => {
       if(!elements.length) return;
       setFilter("ip", data.top_ips[elements[0].index].source_ip);
+    } })
+  }));
+
+  // Top ASNs - nur befuellt, wenn ASN_ENRICHMENT_ENABLED serverseitig aktiv ist
+  // (sonst liefert das Backend hier durchgehend leere Werte, renderBarOrEmpty
+  // zeigt dann einfach die "Keine Daten"-Notiz statt eines eigenen Ein/Aus-Zustands).
+  renderBarOrEmpty("chart-asns", "asns", data.top_asns, () => ({
+    type: "bar",
+    data: {
+      labels: data.top_asns.map(r => `AS${r.as_number} ${r.as_name || ""}`),
+      datasets: [{ label:"Requests", data: data.top_asns.map(r=>r.c), backgroundColor:"#f2b84b" }]
+    },
+    options: baseOptions({ indexAxis:"y", plugins:{legend:{display:false}}, onClick: (evt, elements) => {
+      if(!elements.length) return;
+      const item = data.top_asns[elements[0].index];
+      filters.asn = item.as_number;
+      filters.asn_label = item.as_name;
+      renderFilterChips();
+      refreshAll();
     } })
   }));
 

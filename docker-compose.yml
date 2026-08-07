@@ -16,6 +16,8 @@ services:
       CROWDSEC_MACHINE_PASSWORD: ${CROWDSEC_MACHINE_PASSWORD:-}
       WHITELIST_FILE_PATH: /whitelist/netbird-proxy-whitelist.yaml
       WHITELIST_CONTAINER_NAME: ${WHITELIST_CONTAINER_NAME:-netbird-logparser}
+      ASN_ENRICHMENT_ENABLED: ${ASN_ENRICHMENT_ENABLED:-false}
+      ASN_MMDB_URL: ${ASN_MMDB_URL:-https://hub-data.crowdsec.net/mmdb_update/GeoLite2-ASN.mmdb}
       TZ: ${TZ:-Europe/Zurich}
     volumes:
       - ./data:/data
