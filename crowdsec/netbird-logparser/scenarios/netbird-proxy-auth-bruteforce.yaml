@@ -1,0 +1,17 @@
+type: leaky
+name: netbird-proxy/auth-bruteforce
+description: >
+  Mehrere Authentifizierungsfehler derselben IP in kurzer Zeit ueber die
+  gehosteten Domains - deutet auf Credential-Stuffing/Brute-Force hin. In der
+  Dashboard-DB sichtbare Beispiele: 294 Fehlversuche in 18 Minuten bzw. 154 in
+  32 Sekunden von derselben IP, bisher komplett unbemerkt da der NetBird-Proxy
+  401-Antworten nie in sein eigenes stdout-Log schreibt.
+filter: "evt.Meta.log_type == 'netbird-proxy-access-denied' && evt.Meta.deny_reason == 'Authentication failed'"
+leakspeed: "60s"
+capacity: 5
+groupby: "evt.Meta.source_ip"
+blackhole: 15m
+labels:
+  service: http
+  type: bruteforce
+  remediation: true

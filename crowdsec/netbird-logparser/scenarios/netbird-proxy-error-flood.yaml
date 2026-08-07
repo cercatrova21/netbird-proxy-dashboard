@@ -1,0 +1,12 @@
+type: leaky
+name: netbird-proxy/error-flood
+description: "Häufung von Backend-Fehlern derselben IP - deutet auf systematisches Scannen hin"
+filter: "evt.Meta.log_type == 'netbird-proxy-error'"
+leakspeed: "30s"
+capacity: 15
+groupby: "evt.Meta.source_ip"
+blackhole: 5m
+labels:
+  service: http
+  type: scan
+  remediation: true

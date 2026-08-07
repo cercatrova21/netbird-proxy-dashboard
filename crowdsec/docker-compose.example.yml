@@ -1,0 +1,63 @@
+# Excerpt to merge into your existing docker-compose.yml, alongside wherever
+# your NetBird reverse-proxy already runs. This adds two CrowdSec instances:
+#
+#   - `crowdsec`: the main Local API (LAPI). This is also what feeds decisions
+#     to the NetBird reverse-proxy's own CrowdSec bouncer - see NetBird's docs
+#     for wiring that side up, it's not part of this repo.
+#   - `netbird-logparser`: a second, LAPI-less CrowdSec instance whose only job
+#     is to tail the netbird-proxy / netbird-proxy-dashboard container logs
+#     through this folder's custom parsers/scenarios (see crowdsec/README.md)
+#     and register decisions with the main LAPI above.
+#
+# Adjust the network name, `LOCAL_API_URL`, and the volume paths below to fit
+# your own compose project layout.
+
+services:
+  crowdsec:
+    image: crowdsecurity/crowdsec:latest
+    container_name: crowdsec
+    restart: unless-stopped
+    networks: [your_network]
+    environment:
+      COLLECTIONS: crowdsecurity/linux
+    volumes:
+      - ./crowdsec/config:/etc/crowdsec   # your main LAPI config - credentials/profiles, not part of this repo
+      - crowdsec_db:/var/lib/crowdsec/data
+    healthcheck:
+      test: [CMD, cscli, lapi, status]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  netbird-logparser:
+    image: crowdsecurity/crowdsec:latest
+    container_name: netbird-logparser
+    restart: unless-stopped
+    networks: [your_network]
+    environment:
+      DISABLE_LOCAL_API: "true"
+      AGENT_USERNAME: "netbird-proxy-parser"
+      # Create this machine account against the main LAPI, then put the
+      # generated password here (or in a .env this compose file reads from):
+      #   docker compose exec crowdsec cscli machines add netbird-proxy-parser --auto
+      AGENT_PASSWORD: "${NETBIRD_LOGPARSER_AGENT_PASSWORD}"
+      LOCAL_API_URL: "http://crowdsec:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - netbird_logparser_config:/etc/crowdsec
+      - ./crowdsec/netbird-logparser/acquis.yaml:/etc/crowdsec/acquis.yaml:ro
+      - ./crowdsec/netbird-logparser/parsers/s01-parse/netbird-proxy-errors.yaml:/etc/crowdsec/parsers/s01-parse/netbird-proxy-errors.yaml:ro
+      - ./crowdsec/netbird-logparser/parsers/s01-parse/netbird-proxy-access-denied.yaml:/etc/crowdsec/parsers/s01-parse/netbird-proxy-access-denied.yaml:ro
+      - ./crowdsec/netbird-logparser/scenarios/netbird-proxy-sensitive-path.yaml:/etc/crowdsec/scenarios/netbird-proxy-sensitive-path.yaml:ro
+      - ./crowdsec/netbird-logparser/scenarios/netbird-proxy-error-flood.yaml:/etc/crowdsec/scenarios/netbird-proxy-error-flood.yaml:ro
+      - ./crowdsec/netbird-logparser/scenarios/netbird-proxy-auth-bruteforce.yaml:/etc/crowdsec/scenarios/netbird-proxy-auth-bruteforce.yaml:ro
+      - ./crowdsec/netbird-logparser/scenarios/netbird-proxy-access-flood.yaml:/etc/crowdsec/scenarios/netbird-proxy-access-flood.yaml:ro
+      - ./crowdsec/netbird-logparser/postoverflows/s01-whitelist/netbird-proxy-whitelist.yaml:/etc/crowdsec/postoverflows/s01-whitelist/netbird-proxy-whitelist.yaml:ro
+
+volumes:
+  crowdsec_db:
+  netbird_logparser_config:
+
+networks:
+  your_network:
+    external: true

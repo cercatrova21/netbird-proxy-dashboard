@@ -1,0 +1,14 @@
+onsuccess: next_stage
+filter: "evt.Line.Labels.type == 'netbird-proxy'"
+name: netbird-proxy/backend-error
+description: "Erfasst Backend-Fehler und angefragte Pfade am NetBird-Proxy"
+grok:
+  pattern: 'proxy error: request_id=%{DATA:request_id} client_ip=%{IP:source_ip} method=%{WORD:http_method} host=%{DATA:target_host} path=%{DATA:http_path} status=%{INT:http_status} title="%{DATA:title}" err=%{GREEDYDATA:error_msg}'
+  apply_on: Line.Raw
+statics:
+  - meta: log_type
+    value: netbird-proxy-error
+  - meta: source_ip
+    expression: "evt.Parsed.source_ip"
+  - meta: http_path
+    expression: "evt.Parsed.http_path"

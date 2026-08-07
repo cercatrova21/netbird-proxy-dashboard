@@ -1,0 +1,11 @@
+source: docker
+container_name:
+  - netbird-proxy
+labels:
+  type: netbird-proxy
+---
+source: docker
+container_name:
+  - netbird-proxy-dashboard
+labels:
+  type: netbird-proxy-access

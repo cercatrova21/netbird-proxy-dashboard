@@ -1,0 +1,21 @@
+onsuccess: next_stage
+filter: "evt.Line.Labels.type == 'netbird-proxy-access'"
+name: netbird-proxy/access-denied
+description: >
+  Erfasst vom Dashboard protokollierte, abgelehnte NetBird-Proxy-Requests
+  (Authentifizierungsfehler, 404/405 etc.) inkl. echtem Ziel-Pfad ueber alle
+  gehosteten Domains - der NetBird-Proxy selbst loggt in seinem eigenen stdout
+  nur echte Backend-Verbindungsfehler (502), nie abgelehnte/blockierte
+  Requests, daher war dieser Traffic bisher fuer CrowdSec unsichtbar.
+grok:
+  pattern: 'security_event source_ip=%{IP:source_ip} host=%{DATA:target_host} method=%{WORD:http_method} path=%{DATA:http_path} status=%{DATA:http_status} reason="%{DATA:deny_reason}" user_id=%{DATA:user_id}'
+  apply_on: Line.Raw
+statics:
+  - meta: log_type
+    value: netbird-proxy-access-denied
+  - meta: source_ip
+    expression: "evt.Parsed.source_ip"
+  - meta: http_path
+    expression: "evt.Parsed.http_path"
+  - meta: deny_reason
+    expression: "evt.Parsed.deny_reason"

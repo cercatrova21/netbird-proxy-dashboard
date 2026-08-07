@@ -1,0 +1,17 @@
+type: leaky
+name: netbird-proxy/access-denied-flood
+description: >
+  Haeufung abgelehnter Requests (404/405 etc.) derselben IP ueber alle
+  gehosteten Domains - deutet auf systematisches Scannen hin. Ergaenzt
+  netbird-proxy/error-flood (das nur echte Backend-Verbindungsfehler sieht,
+  z.B. 502 waehrend eines Deployments) um Sichtbarkeit auf tatsaechlich vom
+  Proxy abgelehnte/nicht gefundene Requests, quer durch alle Hosts.
+filter: "evt.Meta.log_type == 'netbird-proxy-access-denied' && evt.Meta.deny_reason == 'Request failed'"
+leakspeed: "60s"
+capacity: 40
+groupby: "evt.Meta.source_ip"
+blackhole: 10m
+labels:
+  service: http
+  type: scan
+  remediation: true

@@ -1,0 +1,35 @@
+type: trigger
+name: netbird-proxy/sensitive-path-scan
+description: >
+  Zugriff auf bekannte Schwachstellen-/Config-/Webshell-Pfade ueber alle
+  gehosteten Domains - sofort sperren. Pattern-Liste basiert auf den
+  tatsaechlich in der Dashboard-DB beobachteten Scan-Payloads (u.a. 2.5k
+  .env-, 940 wp-admin- und 21.6k .php-Requests quer durch alle Hosts, keiner
+  davon legitim - keine der hier gehosteten Apps ist PHP-basiert).
+filter: >
+  (evt.Meta.log_type == 'netbird-proxy-error' || evt.Meta.log_type == 'netbird-proxy-access-denied') &&
+  (evt.Meta.http_path contains '.git/' ||
+   evt.Meta.http_path contains '.env' ||
+   evt.Meta.http_path contains 'wp-admin' ||
+   evt.Meta.http_path contains 'wp-login' ||
+   evt.Meta.http_path contains 'wp-content' ||
+   evt.Meta.http_path contains 'phpmyadmin' ||
+   evt.Meta.http_path contains '.aws/' ||
+   evt.Meta.http_path contains 'xmlrpc.php' ||
+   evt.Meta.http_path contains '.ssh/' ||
+   evt.Meta.http_path contains 'config.php' ||
+   evt.Meta.http_path contains '.htpasswd' ||
+   evt.Meta.http_path contains 'docker-compose.yml' ||
+   evt.Meta.http_path contains 'docker-compose.yaml' ||
+   evt.Meta.http_path contains '.vscode/' ||
+   evt.Meta.http_path contains '/actuator/' ||
+   evt.Meta.http_path contains '.php' ||
+   evt.Meta.http_path contains '.asp' ||
+   evt.Meta.http_path contains '.jsp' ||
+   evt.Meta.http_path contains '.cgi')
+groupby: "evt.Meta.source_ip"
+blackhole: 10m
+labels:
+  service: http
+  type: scan
+  remediation: true

@@ -1,0 +1,14 @@
+name: netbird-proxy/local-whitelist
+description: Private Bereiche und bekannte gute IPs von der Erkennung ausnehmen
+whitelist:
+  reason: private ipv4/ipv6 ip/ranges
+  ip:
+  - 127.0.0.1
+  - ::1
+  # Eigene vertrauenswuerdige oeffentliche IPs hier ergaenzen (z.B. Buero/Home-IP,
+  # eigener VPS) - genau diese Liste verwaltet auch das Whitelist-Widget im
+  # Dashboard, das Eintraege hier hinzufuegt/entfernt.
+  cidr:
+  - 192.168.0.0/16
+  - 10.0.0.0/8
+  - 172.16.0.0/12
