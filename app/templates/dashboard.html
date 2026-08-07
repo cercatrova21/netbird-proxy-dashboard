@@ -71,10 +71,12 @@
     padding:10px 12px; margin: -6px 0 16px 0; font-family: var(--mono); font-size:12px; color: var(--muted);
   }
   .range-custom.open{ display:flex; }
-  .range-custom input[type="datetime-local"]{
+  .range-custom input[type="text"]{
     background: var(--panel-2); border:1px solid var(--border); color: var(--text);
     padding:6px 10px; border-radius:6px; font-family: var(--mono); font-size:12px;
   }
+  .range-custom input.range-date{ width:90px; }
+  .range-custom input.range-time{ width:60px; }
   .range-custom button{
     background: var(--accent-info); border:1px solid var(--accent-info); color: var(--bg);
     padding:6px 14px; border-radius:6px; font-family: var(--mono); font-size:12px; font-weight:600; cursor:pointer;
@@ -291,8 +293,14 @@
   </div>
 
   <div class="range-custom" id="range-custom">
-    <label>Von <input type="datetime-local" id="range-from"></label>
-    <label>Bis <input type="datetime-local" id="range-to"></label>
+    <label>Von
+      <input type="text" class="range-date" id="range-from-date" placeholder="TT.MM.JJJJ" inputmode="numeric" maxlength="10">
+      <input type="text" class="range-time" id="range-from-time" placeholder="HH:MM" inputmode="numeric" maxlength="5" value="00:00">
+    </label>
+    <label>Bis
+      <input type="text" class="range-date" id="range-to-date" placeholder="TT.MM.JJJJ" inputmode="numeric" maxlength="10">
+      <input type="text" class="range-time" id="range-to-time" placeholder="HH:MM" inputmode="numeric" maxlength="5" value="23:59">
+    </label>
     <button type="button" id="range-custom-apply">Anwenden</button>
   </div>
 
@@ -1483,12 +1491,50 @@ document.querySelectorAll("#range-select button").forEach(btn => {
   });
 });
 
+// Native datetime-local-Inputs zeigen Datum/Zeit im Format des Browsers/OS an,
+// nicht steuerbar von der Seite aus - deshalb eigene Text-Felder mit
+// erzwungenem TT.MM.JJJJ / 24h-HH:MM statt datetime-local.
+function attachDateAutoFormat(el){
+  el.addEventListener("input", () => {
+    const digits = el.value.replace(/\D/g, "").slice(0, 8);
+    if(digits.length > 4) el.value = `${digits.slice(0,2)}.${digits.slice(2,4)}.${digits.slice(4)}`;
+    else if(digits.length > 2) el.value = `${digits.slice(0,2)}.${digits.slice(2)}`;
+    else el.value = digits;
+  });
+}
+function attachTimeAutoFormat(el){
+  el.addEventListener("input", () => {
+    const digits = el.value.replace(/\D/g, "").slice(0, 4);
+    if(digits.length > 2) el.value = `${digits.slice(0,2)}:${digits.slice(2)}`;
+    else el.value = digits;
+  });
+}
+["range-from-date", "range-to-date"].forEach(id => attachDateAutoFormat(document.getElementById(id)));
+["range-from-time", "range-to-time"].forEach(id => attachTimeAutoFormat(document.getElementById(id)));
+
+function parseCustomDateTime(dateStr, timeStr){
+  const dm = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec((dateStr || "").trim());
+  const tm = /^(\d{2}):(\d{2})$/.exec((timeStr || "").trim());
+  if(!dm || !tm) return null;
+  const day = +dm[1], month = +dm[2], year = +dm[3], hour = +tm[1], minute = +tm[2];
+  if(month < 1 || month > 12 || hour > 23 || minute > 59) return null;
+  const d = new Date(year, month - 1, day, hour, minute, 0, 0);
+  // Rundreise-Check faengt ungueltige Tage ab (z.B. 31.02.), die der
+  // Date-Konstruktor sonst stillschweigend in den naechsten Monat rollen laesst.
+  if(d.getFullYear() !== year || d.getMonth() !== month - 1 || d.getDate() !== day) return null;
+  return d;
+}
+
 document.getElementById("range-custom-apply").addEventListener("click", () => {
-  const fromEl = document.getElementById("range-from");
-  const toEl = document.getElementById("range-to");
-  if(!fromEl.value || !toEl.value){ alert("Bitte Von und Bis auswählen."); return; }
-  const from = new Date(fromEl.value);
-  const to = new Date(toEl.value);
+  const from = parseCustomDateTime(
+    document.getElementById("range-from-date").value,
+    document.getElementById("range-from-time").value || "00:00"
+  );
+  const to = parseCustomDateTime(
+    document.getElementById("range-to-date").value,
+    document.getElementById("range-to-time").value || "23:59"
+  );
+  if(!from || !to){ alert("Bitte Datum als TT.MM.JJJJ und Zeit als HH:MM (24h) angeben."); return; }
   if(!(from < to)){ alert('"Von" muss vor "Bis" liegen.'); return; }
   customRangeFrom = from.toISOString();
   customRangeTo = to.toISOString();
