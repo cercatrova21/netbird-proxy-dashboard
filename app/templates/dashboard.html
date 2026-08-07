@@ -1473,14 +1473,26 @@ const fpTo = flatpickr("#range-to", {
   defaultHour: 23, defaultMinute: 59,
 });
 
+// Vorbelegung "gestern bis heute" statt leerer Felder, damit man beim Oeffnen
+// des Popovers meist nur noch den Tag anpassen muss statt beide Felder von
+// Grund auf auszufuellen.
+function prefillCustomRangeDefaults(){
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0);
+  const yesterdayStart = new Date(todayStart); yesterdayStart.setDate(yesterdayStart.getDate() - 1);
+  const todayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59);
+  fpFrom.setDate(yesterdayStart, true);
+  fpTo.setDate(todayEnd, true);
+}
+prefillCustomRangeDefaults();
+
 // Alle Preset-Buttons setzen den Range sofort; "Zeitraum…" oeffnet stattdessen
 // nur das Von/Bis-Popover - der eigentliche Range-Wechsel passiert erst beim
 // Klick auf "Anwenden" dort, siehe range-custom-apply.
 function resetToDefaultRange(){
   currentRange = "24h";
   customRangeFrom = customRangeTo = null;
-  fpFrom.clear();
-  fpTo.clear();
+  prefillCustomRangeDefaults();
   document.querySelectorAll("#range-select button").forEach(b => b.classList.toggle("active", b.dataset.range === "24h"));
   document.getElementById("range-custom").classList.remove("open");
 }
