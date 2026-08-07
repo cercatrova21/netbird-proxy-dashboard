@@ -852,8 +852,10 @@ def _compute_stats(args):
     traffic_by_host = defaultdict(lambda: [0, 0])
     hourly_count = Counter()
     hourly_duration_sum, hourly_duration_n = defaultdict(int), defaultdict(int)
+    hourly_upload_sum, hourly_download_sum = defaultdict(int), defaultdict(int)
     durations = []
     slowest = []  # (duration_ms, timestamp, host, path, status_code, source_ip)
+    endpoint_duration_sum, endpoint_duration_n = defaultdict(int), defaultdict(int)
     denied = 0
     traffic_upload_total = traffic_download_total = 0
 
@@ -878,6 +880,8 @@ def _compute_stats(args):
         host_traffic[1] += down
         traffic_upload_total += up
         traffic_download_total += down
+        hourly_upload_sum[bucket] += up
+        hourly_download_sum[bucket] += down
 
         if user_id:
             users[user_id] += 1
@@ -896,6 +900,9 @@ def _compute_stats(args):
             hourly_duration_sum[bucket] += duration_ms
             hourly_duration_n[bucket] += 1
             slowest.append((duration_ms, timestamp, raw_host, path, status_code, source_ip))
+            endpoint_key = (raw_host, path)
+            endpoint_duration_sum[endpoint_key] += duration_ms
+            endpoint_duration_n[endpoint_key] += 1
 
     total_requests = len(rows)
     unique_ips = len(ips)
@@ -915,10 +922,27 @@ def _compute_stats(args):
         for d, ts, h, p, sc, ip in slowest[:15]
     ]
 
+    # Ab 5 Requests pro Endpunkt, damit nicht ein einzelner Ausreisser (z.B. ein
+    # kalter Start) einen sonst schnellen Endpunkt an die Spitze setzt.
+    MIN_SLOW_ENDPOINT_SAMPLES = 5
+    slow_endpoints = sorted(
+        (
+            {"host": h, "path": p, "avg_ms": endpoint_duration_sum[(h, p)] / n_samples, "n": n_samples}
+            for (h, p), n_samples in endpoint_duration_n.items()
+            if n_samples >= MIN_SLOW_ENDPOINT_SAMPLES
+        ),
+        key=lambda x: x["avg_ms"],
+        reverse=True,
+    )[:15]
+
     timeseries = [{"bucket": b, "c": c} for b, c in sorted(hourly_count.items())]
     latency_timeseries = [
         {"bucket": b, "avg_ms": hourly_duration_sum[b] / hourly_duration_n[b]}
         for b in sorted(hourly_duration_n)
+    ]
+    traffic_timeseries = [
+        {"bucket": b, "bytes_upload": hourly_upload_sum[b], "bytes_download": hourly_download_sum[b]}
+        for b in sorted(hourly_count)
     ]
 
     traffic_hosts = sorted(
@@ -969,6 +993,7 @@ def _compute_stats(args):
         status_buckets=[{"bucket": k, "c": v} for k, v in status_buckets_c.items()],
         reasons=[{"reason": k, "c": v} for k, v in reasons_c.most_common(10)],
         timeseries=timeseries,
+        traffic_timeseries=traffic_timeseries,
         traffic_hosts=traffic_hosts,
         traffic_total=dict(bytes_upload=traffic_upload_total, bytes_download=traffic_download_total),
         top_users=[{"user_id": k, "c": v} for k, v in users.most_common(10)],
@@ -979,6 +1004,7 @@ def _compute_stats(args):
         latency=dict(p50=latency_p50, p95=latency_p95, avg=latency_avg),
         latency_timeseries=latency_timeseries,
         slowest_events=slowest_events,
+        slow_endpoints=slow_endpoints,
         anomalies=anomalies,
     )
 

@@ -467,6 +467,22 @@
     </div>
   </div>
 
+  <div class="grid" style="margin-bottom:14px;">
+    <div class="card">
+      <h2>Traffic über Zeit</h2>
+      <canvas id="chart-traffic-time"></canvas>
+    </div>
+    <div class="card table-compact">
+      <h2>Langsamste Endpunkte (Ø, min. 5 Requests)</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Host</th><th>Pfad</th><th>Ø Dauer</th><th>Requests</th></tr></thead>
+          <tbody id="slow-endpoints-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
   <div class="grid2">
     <div class="card">
       <h2>Traffic nach Host</h2>
@@ -1022,6 +1038,35 @@ async function loadStats(){
       </tr>`).join("")
     : `<tr><td colspan="3" style="color:var(--muted)">Keine Daten im gewählten Zeitraum</td></tr>`;
 
+  // Traffic über Zeit
+  destroyChart("traffic-time");
+  charts["traffic-time"] = new Chart(document.getElementById("chart-traffic-time"), {
+    type: "line",
+    data: {
+      labels: data.traffic_timeseries.map(r => fmtBucketLabel(r.bucket)),
+      datasets: [
+        { label: "Download", data: data.traffic_timeseries.map(r => r.bytes_download),
+          borderColor: "#5b9dff", backgroundColor: "rgba(91,157,255,.12)",
+          fill:true, tension:.25, pointRadius:0, borderWidth:2 },
+        { label: "Upload", data: data.traffic_timeseries.map(r => r.bytes_upload),
+          borderColor: "#f2b84b", backgroundColor: "rgba(242,184,75,.12)",
+          fill:true, tension:.25, pointRadius:0, borderWidth:2 }
+      ]
+    },
+    options: baseOptions({})
+  });
+
+  // Langsamste Endpunkte
+  const slowEndpointsBody = document.getElementById("slow-endpoints-body");
+  slowEndpointsBody.innerHTML = data.slow_endpoints.length
+    ? data.slow_endpoints.map(r => `<tr>
+        <td><span class="clickable" data-host="${escapeHtml(r.host)}" data-path="${escapeHtml(r.path)}">${escapeHtml(r.host || "")}</span></td>
+        <td><span class="clickable" data-host="${escapeHtml(r.host)}" data-path="${escapeHtml(r.path)}">${escapeHtml(r.path || "")}</span></td>
+        <td>${formatMs(r.avg_ms)}</td>
+        <td>${r.n.toLocaleString("de-CH")}</td>
+      </tr>`).join("")
+    : `<tr><td colspan="4" style="color:var(--muted)">Keine Daten im gewählten Zeitraum</td></tr>`;
+
   // Traffic nach Host
   renderBarOrEmpty("chart-traffic", "traffic", data.traffic_hosts, () => ({
     type: "bar",
@@ -1131,6 +1176,15 @@ document.getElementById("slowest-body").addEventListener("click", (ev) => {
   const el = ev.target.closest("[data-filter-key]");
   if(!el) return;
   setFilter(el.dataset.filterKey, el.dataset.filterValue);
+});
+
+document.getElementById("slow-endpoints-body").addEventListener("click", (ev) => {
+  const el = ev.target.closest("[data-host]");
+  if(!el) return;
+  filters.host = el.dataset.host;
+  filters.path = el.dataset.path;
+  renderFilterChips();
+  refreshAll();
 });
 
 async function loadEvents(){
