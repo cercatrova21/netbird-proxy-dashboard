@@ -65,6 +65,21 @@
   .range-select button.active{ color: var(--bg); background: var(--accent-info); border-color: var(--accent-info); font-weight:600; }
   #last-update{ color: var(--muted); font-family: var(--mono); font-size:12px; }
 
+  .range-custom{
+    display:none; align-items:center; gap:10px; flex-wrap:wrap;
+    background: var(--panel); border:1px solid var(--border); border-radius:8px;
+    padding:10px 12px; margin: -6px 0 16px 0; font-family: var(--mono); font-size:12px; color: var(--muted);
+  }
+  .range-custom.open{ display:flex; }
+  .range-custom input[type="datetime-local"]{
+    background: var(--panel-2); border:1px solid var(--border); color: var(--text);
+    padding:6px 10px; border-radius:6px; font-family: var(--mono); font-size:12px;
+  }
+  .range-custom button{
+    background: var(--accent-info); border:1px solid var(--accent-info); color: var(--bg);
+    padding:6px 14px; border-radius:6px; font-family: var(--mono); font-size:12px; font-weight:600; cursor:pointer;
+  }
+
   .kpis{ display:grid; grid-template-columns: repeat(auto-fit, minmax(190px,1fr)); gap:14px; margin-bottom:18px; }
   .kpi{ background: var(--panel); border:1px solid var(--border); border-radius:10px; padding:14px 16px; }
   .kpi .label{ color: var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; }
@@ -266,12 +281,19 @@
       <button data-range="7d">7 Tage</button>
       <button data-range="30d">30 Tage</button>
       <button data-range="all">Alles</button>
+      <button type="button" data-range="custom" id="range-custom-toggle">Zeitraum…</button>
     </div>
     <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
       <button type="button" id="anomaly-toggle">
         <span>⚠ <span id="anomaly-count">0</span> Anomalien</span><span class="chevron">▾</span>
       </button>
     </div>
+  </div>
+
+  <div class="range-custom" id="range-custom">
+    <label>Von <input type="datetime-local" id="range-from"></label>
+    <label>Bis <input type="datetime-local" id="range-to"></label>
+    <button type="button" id="range-custom-apply">Anwenden</button>
   </div>
 
   <div class="jump-nav">
@@ -492,6 +514,11 @@
 
 <script>
 let currentRange = "24h";
+// Nur gesetzt/relevant wenn currentRange === "custom" - UTC-ISO-Strings
+// (Date.toISOString()), ersetzen dann die Preset-Range komplett statt sie
+// zu kombinieren, s. appendRangeParams().
+let customRangeFrom = null;
+let customRangeTo = null;
 let charts = {};
 
 // Cross-filter state: clicking a chart segment or table cell sets one of these,
@@ -595,6 +622,9 @@ function clearFilter(key){
   if(key === "all"){
     Object.keys(filters).forEach(k => filters[k] = null);
     Object.keys(FILTER_INPUT_IDS).forEach(syncFilterInput);
+    if(currentRange === "custom") resetToDefaultRange();
+  } else if(key === "range"){
+    resetToDefaultRange();
   } else {
     filters[key] = null;
     syncFilterInput(key);
@@ -610,6 +640,9 @@ function chipHtml(key, label, displayValue){
 function renderFilterChips(){
   const el = document.getElementById("active-filters");
   const chips = [];
+  if(currentRange === "custom" && customRangeFrom && customRangeTo){
+    chips.push(chipHtml("range", "Zeitraum", `${fmtTime(customRangeFrom)} – ${fmtTime(customRangeTo)}`));
+  }
   if(filters.country) chips.push(chipHtml("country", "Land", countryLabel(filters.country)));
   if(filters.host) chips.push(chipHtml("host", "Host", filters.host));
   if(filters.ip) chips.push(chipHtml("ip", "IP", filters.ip));
@@ -641,8 +674,19 @@ function appendFilterParams(params){
   if(filters.user_id) params.set("user_id", filters.user_id);
 }
 
+// Gemeinsam mit buildParams() und loadCrowdsecHistory(), damit der eingestellte
+// Zeitraum (Preset-Button oder Von/Bis) ueberall gleich uebertragen wird.
+function appendRangeParams(params){
+  params.set("range", currentRange);
+  if(currentRange === "custom"){
+    if(customRangeFrom) params.set("from", customRangeFrom);
+    if(customRangeTo) params.set("to", customRangeTo);
+  }
+}
+
 function buildParams(){
-  const params = new URLSearchParams({ range: currentRange });
+  const params = new URLSearchParams();
+  appendRangeParams(params);
   appendFilterParams(params);
   return params;
 }
@@ -1197,7 +1241,8 @@ async function loadCrowdsecHistory(){
   const body = document.getElementById("crowdsec-history-body");
   try{
     const search = document.getElementById("cs-search").value.trim();
-    const params = new URLSearchParams({ range: currentRange, limit: "200" });
+    const params = new URLSearchParams({ limit: "200" });
+    appendRangeParams(params);
     if(search) params.set("search", search);
     appendFilterParams(params);
 
@@ -1399,13 +1444,46 @@ document.querySelectorAll(".jump-nav button[data-jump]").forEach(btn => {
   });
 });
 
+// Alle Preset-Buttons setzen den Range sofort; "Zeitraum…" oeffnet stattdessen
+// nur das Von/Bis-Popover - der eigentliche Range-Wechsel passiert erst beim
+// Klick auf "Anwenden" dort, siehe range-custom-apply.
+function resetToDefaultRange(){
+  currentRange = "24h";
+  customRangeFrom = customRangeTo = null;
+  document.querySelectorAll("#range-select button").forEach(b => b.classList.toggle("active", b.dataset.range === "24h"));
+  document.getElementById("range-custom").classList.remove("open");
+}
+
 document.querySelectorAll("#range-select button").forEach(btn => {
   btn.addEventListener("click", () => {
+    if(btn.dataset.range === "custom"){
+      document.getElementById("range-custom").classList.toggle("open");
+      return;
+    }
     document.querySelectorAll("#range-select button").forEach(b=>b.classList.remove("active"));
     btn.classList.add("active");
     currentRange = btn.dataset.range;
+    customRangeFrom = customRangeTo = null;
+    document.getElementById("range-custom").classList.remove("open");
+    renderFilterChips();
     refreshAll();
   });
+});
+
+document.getElementById("range-custom-apply").addEventListener("click", () => {
+  const fromEl = document.getElementById("range-from");
+  const toEl = document.getElementById("range-to");
+  if(!fromEl.value || !toEl.value){ alert("Bitte Von und Bis auswählen."); return; }
+  const from = new Date(fromEl.value);
+  const to = new Date(toEl.value);
+  if(!(from < to)){ alert('"Von" muss vor "Bis" liegen.'); return; }
+  customRangeFrom = from.toISOString();
+  customRangeTo = to.toISOString();
+  currentRange = "custom";
+  document.querySelectorAll("#range-select button").forEach(b => b.classList.toggle("active", b.dataset.range === "custom"));
+  document.getElementById("range-custom").classList.remove("open");
+  renderFilterChips();
+  refreshAll();
 });
 document.getElementById("f-search").addEventListener("input", () => { clearTimeout(window._st); window._st = setTimeout(loadEvents, 300); });
 document.getElementById("f-status").addEventListener("change", (ev) => {

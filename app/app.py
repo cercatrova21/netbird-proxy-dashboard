@@ -525,6 +525,23 @@ def range_cutoff(range_key):
     return (datetime.now(timezone.utc) - delta).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def resolve_range(range_key, args):
+    """Resolves the (cutoff, until) bounds for a request's range param.
+
+    range=custom uses explicit from/to query params (UTC ISO strings, as
+    produced by the browser's Date.toISOString() from a datetime-local input)
+    for an exact bounded window - either end may be omitted for an open-ended
+    custom range. Every other range key keeps the existing preset-delta-from-
+    now behavior, which is unbounded above (there's never a future row to
+    exclude, so no explicit "until" is needed there).
+    """
+    if range_key == "custom":
+        from_ts = args.get("from", "").strip()
+        to_ts = args.get("to", "").strip()
+        return (from_ts or None), (to_ts or None)
+    return range_cutoff(range_key), None
+
+
 BUCKET_CONDITIONS = {
     "2xx": "(status_code >= 200 AND status_code < 300)",
     "3xx": "(status_code >= 300 AND status_code < 400)",
@@ -723,7 +740,7 @@ def apply_common_filters(args, where_clauses, params):
             params.append(city)
 
 
-def crowdsec_source_ip_filter(args, cutoff=None):
+def crowdsec_source_ip_filter(args, cutoff=None, until=None):
     """Links the page's cross-filters to the CrowdSec tables.
 
     A crowdsec_alerts row has no host/path/status/reason of its own (a ban
@@ -742,6 +759,9 @@ def crowdsec_source_ip_filter(args, cutoff=None):
     if cutoff:
         filter_where.append("timestamp >= ?")
         filter_params.append(cutoff)
+    if until:
+        filter_where.append("timestamp <= ?")
+        filter_params.append(until)
     sub_where = " AND ".join(filter_where)
     return (
         f"source_ip IN (SELECT DISTINCT source_ip FROM proxy_events WHERE {sub_where} AND source_ip IS NOT NULL)",
@@ -793,7 +813,7 @@ def api_stats():
 
 def _compute_stats(args):
     range_key = args.get("range", "24h")
-    cutoff = range_cutoff(range_key)
+    cutoff, until = resolve_range(range_key, args)
     conn = get_conn()
 
     where_clauses = []
@@ -801,6 +821,9 @@ def _compute_stats(args):
     if cutoff:
         where_clauses.append("timestamp >= ?")
         params.append(cutoff)
+    if until:
+        where_clauses.append("timestamp <= ?")
+        params.append(until)
     apply_common_filters(args, where_clauses, params)
 
     where = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
@@ -963,7 +986,7 @@ def _compute_stats(args):
 @app.route("/api/events")
 def api_events():
     range_key = request.args.get("range", "24h")
-    cutoff = range_cutoff(range_key)
+    cutoff, until = resolve_range(range_key, request.args)
     search = request.args.get("search", "").strip()
     limit = min(int(request.args.get("limit", "200")), 500)
 
@@ -972,6 +995,9 @@ def api_events():
     if cutoff:
         where_clauses.append("timestamp >= ?")
         params.append(cutoff)
+    if until:
+        where_clauses.append("timestamp <= ?")
+        params.append(until)
     if search:
         apply_search(search, where_clauses, params)
     apply_common_filters(request.args, where_clauses, params)
@@ -1061,7 +1087,7 @@ def api_crowdsec_history():
     """Verlauf aller je gesehenen CrowdSec-Bans (auch abgelaufene) - haelt laenger
     vor als CrowdSecs eigene ~7-Tage-Historie, siehe sync_crowdsec()."""
     range_key = request.args.get("range", "24h")
-    cutoff = range_cutoff(range_key)
+    cutoff, until = resolve_range(range_key, request.args)
     search = request.args.get("search", "").strip()
     limit = min(int(request.args.get("limit", "200")), 500)
 
@@ -1069,9 +1095,12 @@ def api_crowdsec_history():
     if cutoff:
         where_clauses.append("created_at >= ?")
         params.append(cutoff)
+    if until:
+        where_clauses.append("created_at <= ?")
+        params.append(until)
     if search:
         apply_search(search, where_clauses, params, fields=CROWDSEC_SEARCH_FIELDS)
-    ip_filter, ip_params = crowdsec_source_ip_filter(request.args, cutoff=cutoff)
+    ip_filter, ip_params = crowdsec_source_ip_filter(request.args, cutoff=cutoff, until=until)
     if ip_filter:
         where_clauses.append(ip_filter)
         params.extend(ip_params)
