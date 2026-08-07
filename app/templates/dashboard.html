@@ -861,6 +861,12 @@ function renderAnomalies(anomalies){
         <button type="button" data-filter-key="ip" data-filter-value="${escapeHtml(a.source_ip)}">Filtern</button>
       </div>`;
     }
+    if(a.type === "crowdsec_unavailable"){
+      return `<div class="anomaly critical">
+        <span class="tag">CrowdSec</span>
+        <span>Bei ${a.count.toLocaleString("de-CH")} Request(s) im gewählten Zeitraum war CrowdSec beim Bouncer-Check nicht erreichbar - Sicherheits-Blindspot pruefen</span>
+      </div>`;
+    }
     return "";
   }).join("");
 }
@@ -1205,6 +1211,14 @@ async function loadEvents(){
     const hostCell = e.host ? `<span class="clickable" data-filter-key="host" data-filter-value="${escapeHtml(e.host)}">${escapeHtml(e.host)}</span>` : "";
     const ipCell = e.source_ip ? `<span class="clickable" data-filter-key="ip" data-filter-value="${escapeHtml(e.source_ip)}">${escapeHtml(e.source_ip)}</span>` : "";
     const countryCell = e.country_code ? `<span class="clickable" data-filter-key="country" data-filter-value="${escapeHtml(e.country_code)}">${countryLabel(e.country_code)}</span>` : "";
+    // metadata.crowdsec_verdict ist extrem selten (~100 von 300k Requests) - NetBird
+    // proxys eigener Bouncer-Check-Ausgang pro Request, kein eigenes Reason-Feld,
+    // deshalb hier nur als Zusatz-Badge neben dem Deny-Grund statt eigener Spalte.
+    const csVerdictBadge = e.crowdsec_verdict === "crowdsec_unavailable"
+      ? ` <span class="badge warn" title="CrowdSec beim Bouncer-Check nicht erreichbar">CrowdSec n/a</span>`
+      : e.crowdsec_verdict === "crowdsec_ban"
+        ? ` <span class="badge deny" title="Von CrowdSec blockiert">CrowdSec-Ban</span>`
+        : "";
     return `<tr>
       <td>${escapeHtml(fmtTime(e.timestamp))}</td>
       <td>${escapeHtml(e.method || (e.protocol||"").toUpperCase())}</td>
@@ -1215,7 +1229,7 @@ async function loadEvents(){
       <td>${countryCell}</td>
       <td>${escapeHtml(e.user_id || "")}</td>
       <td>${escapeHtml(e.auth_method_used || "")}</td>
-      <td>${denied ? `<span class="badge deny">${escapeHtml(e.reason)}</span>` : ""}</td>
+      <td>${denied ? `<span class="badge deny">${escapeHtml(e.reason)}</span>` : ""}${csVerdictBadge}</td>
     </tr>`;
   }).join("") || `<tr><td colspan="10" style="color:var(--muted)">Keine Events gefunden</td></tr>`;
 }

@@ -839,7 +839,7 @@ def _compute_stats(args):
         f"""
         SELECT country_code, host, path, city_name, source_ip, duration_ms,
                bytes_upload, bytes_download, reason, user_id, auth_method_used,
-               status_code, timestamp
+               status_code, timestamp, metadata
         FROM proxy_events {where}
         """,
         params,
@@ -857,11 +857,12 @@ def _compute_stats(args):
     slowest = []  # (duration_ms, timestamp, host, path, status_code, source_ip)
     endpoint_duration_sum, endpoint_duration_n = defaultdict(int), defaultdict(int)
     denied = 0
+    crowdsec_unavailable_count = 0
     traffic_upload_total = traffic_download_total = 0
 
     for (raw_country, raw_host, path, raw_city, source_ip, duration_ms,
          bytes_upload, bytes_download, reason, user_id, auth_method_used,
-         status_code, timestamp) in rows:
+         status_code, timestamp, metadata) in rows:
         country_code = label_country(raw_country, source_ip)
         host = raw_host or UNKNOWN_HOST_LABEL
         city = label_city(raw_city, source_ip)
@@ -891,6 +892,12 @@ def _compute_stats(args):
             denied += 1
             reasons_c[reason] += 1
             denies_by_ip[source_ip] += 1
+        if metadata:
+            try:
+                if json.loads(metadata).get("crowdsec_verdict") == "crowdsec_unavailable":
+                    crowdsec_unavailable_count += 1
+            except (ValueError, AttributeError):
+                pass  # kaputtes/unerwartetes JSON ignorieren statt die ganze Stats-Berechnung zu werfen
 
         status_buckets_c[status_bucket(status_code)] += 1
         hourly_count[bucket] += 1
@@ -982,6 +989,9 @@ def _compute_stats(args):
         if c >= ANOMALY_DENY_THRESHOLD:
             anomalies.append({"type": "ip_deny_spike", "source_ip": ip, "count": c})
 
+    if crowdsec_unavailable_count:
+        anomalies.append({"type": "crowdsec_unavailable", "count": crowdsec_unavailable_count})
+
     conn.close()
 
     return dict(
@@ -1034,7 +1044,7 @@ def api_events():
     rows = conn.execute(
         f"""
         SELECT timestamp, method, host, path, status_code, duration_ms, source_ip,
-               country_code, city_name, user_id, auth_method_used, reason, protocol
+               country_code, city_name, user_id, auth_method_used, reason, protocol, metadata
         FROM proxy_events
         {where_sql}
         ORDER BY timestamp DESC
@@ -1049,6 +1059,13 @@ def api_events():
         e = dict(r)
         e["country_code"] = label_country(e["country_code"], e["source_ip"])
         e["city_name"] = label_city(e["city_name"], e["source_ip"])
+        metadata = e.pop("metadata")
+        e["crowdsec_verdict"] = None
+        if metadata:
+            try:
+                e["crowdsec_verdict"] = json.loads(metadata).get("crowdsec_verdict")
+            except (ValueError, AttributeError):
+                pass
         events.append(e)
 
     return jsonify(events=events)
