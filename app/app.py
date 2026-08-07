@@ -723,6 +723,32 @@ def apply_common_filters(args, where_clauses, params):
             params.append(city)
 
 
+def crowdsec_source_ip_filter(args, cutoff=None):
+    """Links the page's cross-filters to the CrowdSec tables.
+
+    A crowdsec_alerts row has no host/path/status/reason of its own (a ban
+    covers everything from that IP, not one request) - only source_ip and
+    country_code overlap with proxy_events. So when any cross-filter is
+    active, scope CrowdSec results to IPs that also appear in the currently
+    filtered proxy_events view instead of leaving the CrowdSec tables
+    unfiltered. Returns (None, []) when no cross-filter is set, so CrowdSec
+    scenarios unrelated to proxy traffic (e.g. port-scan decisions from other
+    collections) still show up by default.
+    """
+    filter_where, filter_params = [], []
+    apply_common_filters(args, filter_where, filter_params)
+    if not filter_where:
+        return None, []
+    if cutoff:
+        filter_where.append("timestamp >= ?")
+        filter_params.append(cutoff)
+    sub_where = " AND ".join(filter_where)
+    return (
+        f"source_ip IN (SELECT DISTINCT source_ip FROM proxy_events WHERE {sub_where} AND source_ip IS NOT NULL)",
+        filter_params,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -987,13 +1013,19 @@ def api_crowdsec_current():
     gleichzeitig ausloest (z.B. auth-bruteforce + sensitive-path-scan)."""
     conn = get_conn()
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    where_clauses = ["expires_at IS NOT NULL", "expires_at > ?"]
+    params = [now]
+    ip_filter, ip_params = crowdsec_source_ip_filter(request.args)
+    if ip_filter:
+        where_clauses.append(ip_filter)
+        params.extend(ip_params)
     rows = conn.execute(
-        """
+        f"""
         SELECT * FROM crowdsec_alerts
-        WHERE expires_at IS NOT NULL AND expires_at > ?
+        WHERE {' AND '.join(where_clauses)}
         ORDER BY created_at ASC
         """,
-        (now,),
+        params,
     ).fetchall()
     conn.close()
 
@@ -1039,6 +1071,10 @@ def api_crowdsec_history():
         params.append(cutoff)
     if search:
         apply_search(search, where_clauses, params, fields=CROWDSEC_SEARCH_FIELDS)
+    ip_filter, ip_params = crowdsec_source_ip_filter(request.args, cutoff=cutoff)
+    if ip_filter:
+        where_clauses.append(ip_filter)
+        params.extend(ip_params)
 
     where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

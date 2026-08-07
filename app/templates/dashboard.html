@@ -625,8 +625,10 @@ function renderFilterChips(){
   document.getElementById("filter-bar").classList.toggle("has-filters", chips.length > 0);
 }
 
-function buildParams(){
-  const params = new URLSearchParams({ range: currentRange });
+// Gemeinsam mit buildParams() und den CrowdSec-Loadern, damit ein gesetzter
+// Cross-Filter (Chart-Klick, Chip, Tabellenzelle) auch die CrowdSec-Tabellen
+// mitfiltert, nicht nur Stats/Events.
+function appendFilterParams(params){
   if(filters.host) params.set("host", filters.host);
   if(filters.country) params.set("country", filters.country);
   if(filters.ip) params.set("ip", filters.ip);
@@ -637,6 +639,11 @@ function buildParams(){
   if(filters.path) params.set("path", filters.path);
   if(filters.city) params.set("city", filters.city);
   if(filters.user_id) params.set("user_id", filters.user_id);
+}
+
+function buildParams(){
+  const params = new URLSearchParams({ range: currentRange });
+  appendFilterParams(params);
   return params;
 }
 
@@ -1108,7 +1115,9 @@ document.getElementById("events-body").addEventListener("click", (ev) => {
 async function loadCrowdsecCurrent(){
   const body = document.getElementById("crowdsec-current-body");
   try{
-    const res = await fetch("/api/crowdsec/current");
+    const params = new URLSearchParams();
+    appendFilterParams(params);
+    const res = await fetch(`/api/crowdsec/current?${params.toString()}`);
     const data = await res.json();
     document.getElementById("cs-active-count").textContent = data.decisions.length.toLocaleString("de-CH");
 
@@ -1190,6 +1199,7 @@ async function loadCrowdsecHistory(){
     const search = document.getElementById("cs-search").value.trim();
     const params = new URLSearchParams({ range: currentRange, limit: "200" });
     if(search) params.set("search", search);
+    appendFilterParams(params);
 
     const res = await fetch(`/api/crowdsec/history?${params.toString()}`);
     const data = await res.json();
