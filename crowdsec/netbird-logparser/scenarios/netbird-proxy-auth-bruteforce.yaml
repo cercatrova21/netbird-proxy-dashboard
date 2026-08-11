@@ -5,8 +5,12 @@ description: >
   gehosteten Domains - deutet auf Credential-Stuffing/Brute-Force hin. In der
   Dashboard-DB sichtbare Beispiele: 294 Fehlversuche in 18 Minuten bzw. 154 in
   32 Sekunden von derselben IP, bisher komplett unbemerkt da der NetBird-Proxy
-  401-Antworten nie in sein eigenes stdout-Log schreibt.
-filter: "evt.Meta.log_type == 'netbird-proxy-access-denied' && evt.Meta.deny_reason == 'Authentication failed'"
+  401-Antworten nie in sein eigenes stdout-Log schreibt. OPTIONS-Requests sind
+  ausgenommen: WebDAV/CalDAV-Sync-Clients (u.a. Nextcloud Desktop) schicken bei
+  jedem Sync-Zyklus einen unauthentifizierten OPTIONS-Preflight, der
+  routinemaessig mit 401 beantwortet wird - kein Bruteforce-Indikator, sondern
+  normales Clientverhalten (beobachtet auf nextcloud.example.com).
+filter: "evt.Meta.log_type == 'netbird-proxy-access-denied' && evt.Meta.deny_reason == 'Authentication failed' && evt.Meta.http_method != 'OPTIONS'"
 leakspeed: "60s"
 capacity: 5
 groupby: "evt.Meta.source_ip"

@@ -17,5 +17,7 @@ statics:
     expression: "evt.Parsed.source_ip"
   - meta: http_path
     expression: "evt.Parsed.http_path"
+  - meta: http_method
+    expression: "evt.Parsed.http_method"
   - meta: deny_reason
     expression: "evt.Parsed.deny_reason"

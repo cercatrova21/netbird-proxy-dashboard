@@ -5,7 +5,10 @@ description: >
   gehosteten Domains - sofort sperren. Pattern-Liste basiert auf den
   tatsaechlich in der Dashboard-DB beobachteten Scan-Payloads (u.a. 2.5k
   .env-, 940 wp-admin- und 21.6k .php-Requests quer durch alle Hosts, keiner
-  davon legitim - keine der hier gehosteten Apps ist PHP-basiert).
+  davon legitim - keine der hier gehosteten Apps ist PHP-basiert). Ausnahme:
+  Nextclouds legitime Front-Controller remote.php (WebDAV/CalDAV/CardDAV) und
+  index.php werden vom generischen .php-Check ausgenommen, sonst matcht z.B.
+  /remote.php/dav faelschlich (beobachtet auf nextcloud.example.com).
 filter: >
   (evt.Meta.log_type == 'netbird-proxy-error' || evt.Meta.log_type == 'netbird-proxy-access-denied') &&
   (evt.Meta.http_path contains '.git/' ||
@@ -23,7 +26,9 @@ filter: >
    evt.Meta.http_path contains 'docker-compose.yaml' ||
    evt.Meta.http_path contains '.vscode/' ||
    evt.Meta.http_path contains '/actuator/' ||
-   evt.Meta.http_path contains '.php' ||
+   (evt.Meta.http_path contains '.php' &&
+    !(evt.Meta.http_path contains '/remote.php') &&
+    !(evt.Meta.http_path contains '/index.php')) ||
    evt.Meta.http_path contains '.asp' ||
    evt.Meta.http_path contains '.jsp' ||
    evt.Meta.http_path contains '.cgi')
