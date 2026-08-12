@@ -555,12 +555,21 @@ let charts = {};
 
 // Cross-filter state: clicking a chart segment or table cell sets one of these,
 // which is then applied to every panel (KPIs, charts, table) simultaneously.
-let filters = { host: null, country: null, ip: null, asn: null, asn_label: null, status: null, bucket: null, status_code: null, reason: null, path: null, city: null, user_id: null };
+// status/bucket/status_code stay single-value (they're driven by their own
+// <select>/<input> in the filter row, not by additive clicking) - every other
+// key is an array so several values (e.g. DE + CH) apply additively/"OR"'d
+// together, per-key either all included or all excluded (see excludedFilters).
+let filters = { host: [], country: [], ip: [], asn: [], status: null, bucket: null, status_code: null, reason: [], path: [], city: [], user_id: [] };
+const MULTI_VALUE_KEYS = new Set(["host","country","ip","asn","reason","path","city","user_id"]);
+// AS-Nummer -> Anzeigename, nur fuer Chip-/Legenden-Anzeige - kein eigener
+// Backend-Filter (im Unterschied zu asn selbst), deshalb separat statt in
+// `filters` und ohne Gegenstueck in BACKEND_FILTER_KEYS/appendFilterParams.
+let asnLabels = {};
 
 // Keys currently inverted ("NICHT X" statt "X") - Klick auf den Chip-Text (nicht
 // das X) togglet ein/aus, ebenso Strg/Cmd-Klick auf einen sonst normal
-// klickbaren Wert in einer Tabelle/Chart. asn_label ist kein eigener Backend-
-// Filter (nur Anzeige neben asn), taucht deshalb hier nie auf.
+// klickbaren Wert in einer Tabelle/Chart. Gilt fuer den gesamten Wertesatz
+// eines Keys auf einmal, nicht pro Einzelwert (siehe toggleFilterValue()).
 let excludedFilters = new Set();
 const BACKEND_FILTER_KEYS = new Set(["host","country","ip","asn","status","bucket","status_code","reason","path","city","user_id"]);
 
@@ -685,39 +694,75 @@ function userCellHtml(userId){
   return `<span class="clickable" data-filter-key="user_id" data-filter-value="${escapeHtml(userId)}" title="${escapeHtml(userId)}">${symbol}</span>`;
 }
 
+// Kernlogik fuer additive Mehrfachauswahl (z.B. Land=DE dann Land=CH -> beide
+// aktiv statt CH ueberschreibt DE): innerhalb desselben Modus (Include/Include
+// oder Exclude/Exclude) wird value in filters[key] toggled (rein/raus), ein
+// Moduswechsel (erster Klick, oder Include-Set + Exclude-Klick oder umgekehrt)
+// startet dagegen bewusst frisch mit nur diesem einen Wert - ein Key kann nicht
+// gleichzeitig "nur DE+CH" und "nicht RU" bedeuten, das waere nicht eindeutig.
+// status/bucket/status_code bleiben einwertig (eigenes <select>/<input>), dafuer
+// das alte Scalar-Toggle-Verhalten unveraendert.
+function toggleFilterValue(key, value, exclude){
+  if(!MULTI_VALUE_KEYS.has(key)){
+    if(filters[key] === value && excludedFilters.has(key) === exclude){
+      filters[key] = null;
+      excludedFilters.delete(key);
+    } else {
+      filters[key] = value;
+      applyExcludeState([key], exclude);
+    }
+    return;
+  }
+  const arr = filters[key] || (filters[key] = []);
+  const sameMode = arr.length > 0 && excludedFilters.has(key) === exclude;
+  if(sameMode){
+    const idx = arr.indexOf(value);
+    if(idx >= 0) arr.splice(idx, 1); else arr.push(value);
+  } else {
+    arr.length = 0;
+    arr.push(value);
+  }
+  applyExcludeState([key], exclude);
+}
+
 // value=null loescht den Filter (wie bisher). exclude=true setzt ihn invertiert
 // ("NICHT value") statt normal - kommt vom Strg/Cmd-Klick auf einen klickbaren
-// Wert. Erneutes Klicken desselben Werts im selben Modus loescht ihn wieder,
-// im jeweils anderen Modus wechselt es nur den Modus statt zu loeschen.
+// Wert.
 function setFilter(key, value, exclude=false){
-  if(filters[key] === value && excludedFilters.has(key) === exclude){
-    filters[key] = null;
-    excludedFilters.delete(key);
-  } else {
-    filters[key] = value;
-    applyExcludeState([key], exclude);
-  }
+  toggleFilterValue(key, value, exclude);
   syncFilterInput(key);
   renderFilterChips();
   refreshAll();
 }
 
 // Wie setFilter(), aber fuer Kombi-Filter, die mehrere Felder gleichzeitig
-// setzen (ASN-Zahl + Anzeigename, Host + Pfad) und deshalb nicht ueber das
-// einfache Toggle-Verhalten von setFilter() laufen koennen.
+// setzen (Host + Pfad einer Zeile aus "Top Pfade"/"Langsamste Endpunkte") -
+// jedes Feld toggelt dabei unabhaengig additiv, s. toggleFilterValue().
 function setFilters(assignments, exclude=false){
-  Object.assign(filters, assignments);
-  applyExcludeState(Object.keys(assignments), exclude);
+  Object.keys(assignments).forEach(key => toggleFilterValue(key, assignments[key], exclude));
   Object.keys(assignments).forEach(syncFilterInput);
   renderFilterChips();
   refreshAll();
 }
 
-// Chip-Text (nicht das X) anklicken: behaelt den Filterwert, dreht ihn aber von
-// Include auf Exclude um (oder zurueck) - die vom Nutzer gewuenschte "diesen
-// Wert explizit ausschliessen"-Aktion ueber die Statusleiste.
+// ASN ist ein Kombi-Filter (Nummer + Anzeigename) - die Nummer laeuft ganz
+// normal additiv durch toggleFilterValue(), der Anzeigename wird separat in
+// asnLabels nachgezogen (rein beim Hinzufuegen, raus beim Entfernen).
+function toggleAsnFilter(asNumber, asName, exclude){
+  toggleFilterValue("asn", asNumber, exclude);
+  if(filters.asn.includes(asNumber)) asnLabels[asNumber] = asName;
+  else delete asnLabels[asNumber];
+  renderFilterChips();
+  refreshAll();
+}
+
+// Chip-Text (nicht das X) anklicken: behaelt den/die aktuellen Filterwert(e),
+// dreht aber den ganzen Satz von Include auf Exclude um (oder zurueck) - die
+// vom Nutzer gewuenschte "diese Werte explizit ausschliessen"-Aktion ueber die
+// Statusleiste.
 function toggleExclude(key){
-  if(filters[key] === null || filters[key] === undefined) return;
+  const hasValue = MULTI_VALUE_KEYS.has(key) ? filters[key].length > 0 : (filters[key] !== null && filters[key] !== undefined);
+  if(!hasValue) return;
   if(excludedFilters.has(key)) excludedFilters.delete(key); else excludedFilters.add(key);
   renderFilterChips();
   refreshAll();
@@ -725,16 +770,17 @@ function toggleExclude(key){
 
 function clearFilter(key){
   if(key === "all"){
-    Object.keys(filters).forEach(k => filters[k] = null);
+    Object.keys(filters).forEach(k => filters[k] = MULTI_VALUE_KEYS.has(k) ? [] : null);
     excludedFilters.clear();
+    asnLabels = {};
     Object.keys(FILTER_INPUT_IDS).forEach(syncFilterInput);
     if(currentRange === "custom") resetToDefaultRange();
   } else if(key === "range"){
     resetToDefaultRange();
   } else {
-    filters[key] = null;
+    filters[key] = MULTI_VALUE_KEYS.has(key) ? [] : null;
     excludedFilters.delete(key);
-    if(key === "asn") filters.asn_label = null;
+    if(key === "asn") asnLabels = {};
     syncFilterInput(key);
   }
   renderFilterChips();
@@ -758,17 +804,17 @@ function renderFilterChips(){
   if(currentRange === "custom" && customRangeFrom && customRangeTo){
     chips.push(chipHtml("range", "Zeitraum", `${fmtTime(customRangeFrom)} – ${fmtTime(customRangeTo)}`, false));
   }
-  if(filters.country) chips.push(chipHtml("country", "Land", countryLabel(filters.country)));
-  if(filters.host) chips.push(chipHtml("host", "Host", filters.host));
-  if(filters.ip) chips.push(chipHtml("ip", "IP", filters.ip));
-  if(filters.asn) chips.push(chipHtml("asn", "ASN", `AS${filters.asn} ${escapeHtml(filters.asn_label || "")}`));
+  if(filters.country.length) chips.push(chipHtml("country", "Land", filters.country.map(countryLabel).join(", ")));
+  if(filters.host.length) chips.push(chipHtml("host", "Host", filters.host.map(escapeHtml).join(", ")));
+  if(filters.ip.length) chips.push(chipHtml("ip", "IP", filters.ip.map(escapeHtml).join(", ")));
+  if(filters.asn.length) chips.push(chipHtml("asn", "ASN", filters.asn.map(a => `AS${escapeHtml(a)} ${escapeHtml(asnLabels[a] || "")}`).join(", ")));
   if(filters.status) chips.push(chipHtml("status", "Status", STATUS_LABELS[filters.status] || filters.status));
   if(filters.bucket) chips.push(chipHtml("bucket", "Code-Bereich", BUCKET_LABELS[filters.bucket] || filters.bucket));
   if(filters.status_code) chips.push(chipHtml("status_code", "Code", filters.status_code));
-  if(filters.reason) chips.push(chipHtml("reason", "Grund", filters.reason));
-  if(filters.path) chips.push(chipHtml("path", "Pfad", filters.path));
-  if(filters.city) chips.push(chipHtml("city", "Stadt", filters.city));
-  if(filters.user_id) chips.push(chipHtml("user_id", "User", `${userSymbol(filters.user_id)} ${escapeHtml(filters.user_id)}`));
+  if(filters.reason.length) chips.push(chipHtml("reason", "Grund", filters.reason.map(escapeHtml).join(", ")));
+  if(filters.path.length) chips.push(chipHtml("path", "Pfad", filters.path.map(escapeHtml).join(", ")));
+  if(filters.city.length) chips.push(chipHtml("city", "Stadt", filters.city.map(escapeHtml).join(", ")));
+  if(filters.user_id.length) chips.push(chipHtml("user_id", "User", filters.user_id.map(u => `${userSymbol(u)} ${escapeHtml(u)}`).join(", ")));
   if(chips.length > 1) chips.push(`<span class="chip clear-all" data-clear="all">Alle Filter zurücksetzen ✕</span>`);
   el.innerHTML = chips.join("");
   document.getElementById("filter-bar").classList.toggle("has-filters", chips.length > 0);
@@ -778,17 +824,17 @@ function renderFilterChips(){
 // Cross-Filter (Chart-Klick, Chip, Tabellenzelle) auch die CrowdSec-Tabellen
 // mitfiltert, nicht nur Stats/Events.
 function appendFilterParams(params){
-  if(filters.host) params.set("host", filters.host);
-  if(filters.country) params.set("country", filters.country);
-  if(filters.ip) params.set("ip", filters.ip);
-  if(filters.asn) params.set("asn", filters.asn);
+  if(filters.host.length) params.set("host", filters.host.join(","));
+  if(filters.country.length) params.set("country", filters.country.join(","));
+  if(filters.ip.length) params.set("ip", filters.ip.join(","));
+  if(filters.asn.length) params.set("asn", filters.asn.join(","));
   if(filters.status) params.set("status", filters.status);
   if(filters.bucket) params.set("bucket", filters.bucket);
   if(filters.status_code) params.set("status_code", filters.status_code);
-  if(filters.reason) params.set("reason", filters.reason);
-  if(filters.path) params.set("path", filters.path);
-  if(filters.city) params.set("city", filters.city);
-  if(filters.user_id) params.set("user_id", filters.user_id);
+  if(filters.reason.length) params.set("reason", filters.reason.join(","));
+  if(filters.path.length) params.set("path", filters.path.join(","));
+  if(filters.city.length) params.set("city", filters.city.join(","));
+  if(filters.user_id.length) params.set("user_id", filters.user_id.join(","));
   if(excludedFilters.size) params.set("exclude", Array.from(excludedFilters).join(","));
 }
 
@@ -845,7 +891,7 @@ function handleFilterClick(el, ev){
   const value = el.dataset.filterValue;
   const exclude = !!(ev.ctrlKey || ev.metaKey);
   if(key === "asn"){
-    setFilters({ asn: value, asn_label: el.dataset.asnLabel || "" }, exclude);
+    toggleAsnFilter(value, el.dataset.asnLabel || "", exclude);
   } else {
     setFilter(key, value, exclude);
   }
@@ -1051,17 +1097,18 @@ function updateWorldMap(countries){
   updateMapSelection();
 }
 
-// Der aktive Länder-Filter (single-select, siehe `filters.country`) wird als
-// Ring auf der Karte markiert - eigene Methode statt der öffentlichen API,
+// Alle aktiven Länder-Filter (siehe `filters.country`, jetzt mehrwertig) werden
+// als Ring auf der Karte markiert - eigene Methode statt der öffentlichen API,
 // da jsVectorMap 1.5.3 kein "setSelectedRegions" exponiert, nur den internen
 // this._setSelected()-Helper (siehe getSelectedRegions/clearSelectedRegions).
 function updateMapSelection(){
   if(!worldMap) return;
   try{
     worldMap.clearSelectedRegions();
-    if(filters.country && filters.country !== UNKNOWN_COUNTRY && filters.country !== INTERNAL_COUNTRY && filters.country !== NBM_COUNTRY){
-      worldMap._setSelected("regions", [filters.country.toUpperCase()]);
-    }
+    const codes = filters.country
+      .filter(c => c !== UNKNOWN_COUNTRY && c !== INTERNAL_COUNTRY && c !== NBM_COUNTRY)
+      .map(c => c.toUpperCase());
+    if(codes.length) worldMap._setSelected("regions", codes);
   }catch(e){
     console.warn("Kartenauswahl konnte nicht aktualisiert werden", e);
   }
@@ -1265,7 +1312,7 @@ async function loadStats(){
     options: baseOptions({ indexAxis:"y", plugins:{legend:{display:false}}, onClick: (evt, elements) => {
       if(!elements.length) return;
       const item = data.top_asns[elements[0].index];
-      setFilters({ asn: item.as_number, asn_label: item.as_name }, chartExclude(evt));
+      toggleAsnFilter(item.as_number, item.as_name, chartExclude(evt));
     } })
   }));
 

@@ -846,6 +846,12 @@ def apply_common_filters(args, where_clauses, params):
     string) that should be negated - i.e. "everything EXCEPT this value"
     instead of "only this value" - set from the dashboard's filter chips
     (click chip to invert) or Ctrl/Cmd-click on a clickable value.
+
+    host/country/ip/asn/reason/path/city/user_id additionally accept several
+    comma-separated values (e.g. "country=DE,CH"), matched with OR - lets the
+    dashboard's additive multi-select ("DE" then also "CH") turn into a single
+    IN-like clause, still with the same include/exclude semantics for the
+    whole set (see `add`/`add_multi`).
     """
     exclude = {k for k in args.get("exclude", "").split(",") if k}
 
@@ -854,8 +860,25 @@ def apply_common_filters(args, where_clauses, params):
         # ASN-Daten, Deny ohne Grund) ist SQL-technisch weder col=? noch NOT(col=?)
         # - beides ergibt NULL, nicht TRUE/FALSE, und die Zeile würde bei einem
         # blossen NOT(...) aus BEIDEN Richtungen (Include UND Exclude) verschwinden.
+        # Gilt genauso fuer eine ganze OR-Gruppe aus add_multi() - NULL OR NULL
+        # ist wieder NULL, "IS NOT TRUE" faengt das fuer die gesamte Gruppe ab.
         where_clauses.append(f"({clause}) IS NOT TRUE" if key in exclude else clause)
         params.extend(clause_params)
+
+    def split_multi(raw):
+        return [v.strip() for v in raw.split(",") if v.strip()]
+
+    def add_multi(key, raw, clause_builder):
+        values = split_multi(raw)
+        if not values:
+            return
+        clauses, all_params = [], []
+        for v in values:
+            clause, clause_params = clause_builder(v)
+            clauses.append(clause)
+            all_params.extend(clause_params)
+        group = clauses[0] if len(clauses) == 1 else "(" + " OR ".join(clauses) + ")"
+        add(key, group, all_params)
 
     host = args.get("host", "").strip()
     country = args.get("country", "").strip()
@@ -868,27 +891,29 @@ def apply_common_filters(args, where_clauses, params):
     user_id = args.get("user_id", "").strip()
     city = args.get("city", "").strip()
 
-    if host:
-        if host == UNKNOWN_HOST_LABEL:
-            add("host", "(host IS NULL OR host = '')")
-        else:
-            add("host", "host = ?", [host])
-    if country:
-        if country == INTERNAL_COUNTRY_LABEL:
-            add("country", f"((country_code IS NULL OR country_code = '') AND {_PRIVATE_IP_SQL})")
-        elif country == NBM_COUNTRY_LABEL:
-            add("country", f"((country_code IS NULL OR country_code = '') AND {_NETBIRD_MESH_SQL})")
-        elif country == UNKNOWN_COUNTRY_LABEL:
-            add(
-                "country",
+    def host_clause(h):
+        if h == UNKNOWN_HOST_LABEL:
+            return "(host IS NULL OR host = '')", []
+        return "host = ?", [h]
+
+    add_multi("host", host, host_clause)
+
+    def country_clause(c):
+        if c == INTERNAL_COUNTRY_LABEL:
+            return f"((country_code IS NULL OR country_code = '') AND {_PRIVATE_IP_SQL})", []
+        if c == NBM_COUNTRY_LABEL:
+            return f"((country_code IS NULL OR country_code = '') AND {_NETBIRD_MESH_SQL})", []
+        if c == UNKNOWN_COUNTRY_LABEL:
+            return (
                 f"((country_code IS NULL OR country_code = '') AND NOT {_PRIVATE_IP_SQL} AND NOT {_NETBIRD_MESH_SQL})",
+                [],
             )
-        else:
-            add("country", "country_code = ?", [country])
-    if ip:
-        add("ip", "source_ip = ?", [ip])
-    if asn:
-        add("asn", "as_number = ?", [asn])
+        return "country_code = ?", [c]
+
+    add_multi("country", country, country_clause)
+    add_multi("ip", ip, lambda v: ("source_ip = ?", [v]))
+    add_multi("asn", asn, lambda v: ("as_number = ?", [v]))
+
     if status == "denied":
         add("status", "(reason IS NOT NULL AND reason != '')")
     elif status == "allowed":
@@ -901,24 +926,24 @@ def apply_common_filters(args, where_clauses, params):
             add("status_code", "status_code = ?", [int(status_code)])
         except ValueError:
             pass  # nicht-numerische Eingabe wird ignoriert statt einen 500er zu werfen
-    if reason:
-        add("reason", "reason = ?", [reason])
-    if path:
-        add("path", "path = ?", [path])
-    if user_id:
-        add("user_id", "user_id = ?", [user_id])
-    if city:
-        if city == INTERNAL_CITY_LABEL:
-            add("city", f"((city_name IS NULL OR city_name = '') AND {_PRIVATE_IP_SQL})")
-        elif city == NBM_CITY_LABEL:
-            add("city", f"((city_name IS NULL OR city_name = '') AND {_NETBIRD_MESH_SQL})")
-        elif city == UNKNOWN_CITY_LABEL:
-            add(
-                "city",
+
+    add_multi("reason", reason, lambda v: ("reason = ?", [v]))
+    add_multi("path", path, lambda v: ("path = ?", [v]))
+    add_multi("user_id", user_id, lambda v: ("user_id = ?", [v]))
+
+    def city_clause(c):
+        if c == INTERNAL_CITY_LABEL:
+            return f"((city_name IS NULL OR city_name = '') AND {_PRIVATE_IP_SQL})", []
+        if c == NBM_CITY_LABEL:
+            return f"((city_name IS NULL OR city_name = '') AND {_NETBIRD_MESH_SQL})", []
+        if c == UNKNOWN_CITY_LABEL:
+            return (
                 f"((city_name IS NULL OR city_name = '') AND NOT {_PRIVATE_IP_SQL} AND NOT {_NETBIRD_MESH_SQL})",
+                [],
             )
-        else:
-            add("city", "city_name = ?", [city])
+        return "city_name = ?", [c]
+
+    add_multi("city", city, city_clause)
 
 
 def crowdsec_source_ip_filter(args, cutoff=None, until=None):
