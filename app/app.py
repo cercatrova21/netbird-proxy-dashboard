@@ -841,7 +841,22 @@ def apply_common_filters(args, where_clauses, params):
 
     Kept in one place so clicking a chart segment or table cell filters
     every panel identically, Grafana-style.
+
+    `exclude` is a comma-separated list of filter keys (from the query
+    string) that should be negated - i.e. "everything EXCEPT this value"
+    instead of "only this value" - set from the dashboard's filter chips
+    (click chip to invert) or Ctrl/Cmd-click on a clickable value.
     """
+    exclude = {k for k in args.get("exclude", "").split(",") if k}
+
+    def add(key, clause, clause_params=()):
+        # "IS NOT TRUE" statt NOT(...): eine Zeile mit NULL-Spalte (z.B. IP ohne
+        # ASN-Daten, Deny ohne Grund) ist SQL-technisch weder col=? noch NOT(col=?)
+        # - beides ergibt NULL, nicht TRUE/FALSE, und die Zeile würde bei einem
+        # blossen NOT(...) aus BEIDEN Richtungen (Include UND Exclude) verschwinden.
+        where_clauses.append(f"({clause}) IS NOT TRUE" if key in exclude else clause)
+        params.extend(clause_params)
+
     host = args.get("host", "").strip()
     country = args.get("country", "").strip()
     ip = args.get("ip", "").strip()
@@ -855,62 +870,55 @@ def apply_common_filters(args, where_clauses, params):
 
     if host:
         if host == UNKNOWN_HOST_LABEL:
-            where_clauses.append("(host IS NULL OR host = '')")
+            add("host", "(host IS NULL OR host = '')")
         else:
-            where_clauses.append("host = ?")
-            params.append(host)
+            add("host", "host = ?", [host])
     if country:
         if country == INTERNAL_COUNTRY_LABEL:
-            where_clauses.append(f"((country_code IS NULL OR country_code = '') AND {_PRIVATE_IP_SQL})")
+            add("country", f"((country_code IS NULL OR country_code = '') AND {_PRIVATE_IP_SQL})")
         elif country == NBM_COUNTRY_LABEL:
-            where_clauses.append(f"((country_code IS NULL OR country_code = '') AND {_NETBIRD_MESH_SQL})")
+            add("country", f"((country_code IS NULL OR country_code = '') AND {_NETBIRD_MESH_SQL})")
         elif country == UNKNOWN_COUNTRY_LABEL:
-            where_clauses.append(
-                f"((country_code IS NULL OR country_code = '') AND NOT {_PRIVATE_IP_SQL} AND NOT {_NETBIRD_MESH_SQL})"
+            add(
+                "country",
+                f"((country_code IS NULL OR country_code = '') AND NOT {_PRIVATE_IP_SQL} AND NOT {_NETBIRD_MESH_SQL})",
             )
         else:
-            where_clauses.append("country_code = ?")
-            params.append(country)
+            add("country", "country_code = ?", [country])
     if ip:
-        where_clauses.append("source_ip = ?")
-        params.append(ip)
+        add("ip", "source_ip = ?", [ip])
     if asn:
-        where_clauses.append("as_number = ?")
-        params.append(asn)
+        add("asn", "as_number = ?", [asn])
     if status == "denied":
-        where_clauses.append("(reason IS NOT NULL AND reason != '')")
+        add("status", "(reason IS NOT NULL AND reason != '')")
     elif status == "allowed":
-        where_clauses.append("(reason IS NULL OR reason = '')")
+        add("status", "(reason IS NULL OR reason = '')")
     if bucket in BUCKET_CONDITIONS:
-        where_clauses.append(BUCKET_CONDITIONS[bucket])
+        add("bucket", BUCKET_CONDITIONS[bucket])
     status_code = args.get("status_code", "").strip()
     if status_code:
         try:
-            where_clauses.append("status_code = ?")
-            params.append(int(status_code))
+            add("status_code", "status_code = ?", [int(status_code)])
         except ValueError:
             pass  # nicht-numerische Eingabe wird ignoriert statt einen 500er zu werfen
     if reason:
-        where_clauses.append("reason = ?")
-        params.append(reason)
+        add("reason", "reason = ?", [reason])
     if path:
-        where_clauses.append("path = ?")
-        params.append(path)
+        add("path", "path = ?", [path])
     if user_id:
-        where_clauses.append("user_id = ?")
-        params.append(user_id)
+        add("user_id", "user_id = ?", [user_id])
     if city:
         if city == INTERNAL_CITY_LABEL:
-            where_clauses.append(f"((city_name IS NULL OR city_name = '') AND {_PRIVATE_IP_SQL})")
+            add("city", f"((city_name IS NULL OR city_name = '') AND {_PRIVATE_IP_SQL})")
         elif city == NBM_CITY_LABEL:
-            where_clauses.append(f"((city_name IS NULL OR city_name = '') AND {_NETBIRD_MESH_SQL})")
+            add("city", f"((city_name IS NULL OR city_name = '') AND {_NETBIRD_MESH_SQL})")
         elif city == UNKNOWN_CITY_LABEL:
-            where_clauses.append(
-                f"((city_name IS NULL OR city_name = '') AND NOT {_PRIVATE_IP_SQL} AND NOT {_NETBIRD_MESH_SQL})"
+            add(
+                "city",
+                f"((city_name IS NULL OR city_name = '') AND NOT {_PRIVATE_IP_SQL} AND NOT {_NETBIRD_MESH_SQL})",
             )
         else:
-            where_clauses.append("city_name = ?")
-            params.append(city)
+            add("city", "city_name = ?", [city])
 
 
 def crowdsec_source_ip_filter(args, cutoff=None, until=None):
@@ -1251,7 +1259,8 @@ def api_events():
     rows = conn.execute(
         f"""
         SELECT timestamp, method, host, path, status_code, duration_ms, source_ip,
-               country_code, city_name, user_id, auth_method_used, reason, protocol, metadata
+               country_code, city_name, user_id, auth_method_used, reason, protocol, metadata,
+               as_number, as_name
         FROM proxy_events
         {where_sql}
         ORDER BY timestamp DESC

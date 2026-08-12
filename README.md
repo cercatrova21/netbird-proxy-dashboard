@@ -215,8 +215,14 @@ The frontend consumes these; they're plain JSON and can be queried directly
 - `GET /healthz` - basic liveness check.
 
 Supported filters (as query params) on both `/api/stats` and `/api/events`:
-`host`, `country`, `ip`, `path`, `city`, `user_id`, `status` (`allowed`/`denied`),
-`bucket` (`2xx`/`3xx`/`4xx`/`5xx`/`n/a`), `reason`.
+`host`, `country`, `ip`, `asn`, `path`, `city`, `user_id`, `status` (`allowed`/`denied`),
+`bucket` (`2xx`/`3xx`/`4xx`/`5xx`/`n/a`), `reason`, `status_code`.
+
+Any of these can be inverted with `exclude=<comma-separated filter keys>`, e.g.
+`?country=DE&exclude=country` matches everything *except* Germany instead of
+only Germany. In the UI this is what clicking an active filter chip's text (not
+its ✕) does, and Ctrl/Cmd-clicking a filterable value anywhere does the same in
+one step.
 
 If CrowdSec is configured (see [above](#crowdsec-integration-optional)):
 

@@ -197,6 +197,8 @@
     padding: 4px 6px 4px 10px; border-radius: 999px; font-family: var(--mono); font-size:11px;
   }
   .chip b{ font-weight:600; color: var(--text); }
+  .chip-value{ cursor:pointer; }
+  .chip-value:hover{ text-decoration: underline; }
   .chip button{
     background:none; border:none; color: var(--accent-info); cursor:pointer; font-size:13px;
     line-height:1; padding:2px 4px; border-radius:50%;
@@ -204,6 +206,12 @@
   .chip button:hover{ background: rgba(91,157,255,.25); }
   .chip.clear-all{ background: rgba(255,107,94,.1); border-color: var(--accent-deny); color: var(--accent-deny); cursor:pointer; }
   .chip.clear-all:hover{ background: rgba(255,107,94,.2); }
+  /* Invertierter Filter ("NICHT X") - eigene Farbe, damit auf einen Blick klar
+     ist, dass hier aus- statt eingeschlossen wird, ohne den Chip-Text lesen zu muessen. */
+  .chip.chip-exclude{ background: rgba(255,107,94,.12); border-color: var(--accent-deny); color: var(--accent-deny); }
+  .chip.chip-exclude b{ color: var(--text); }
+  .chip.chip-exclude button{ color: var(--accent-deny); }
+  .chip.chip-exclude button:hover{ background: rgba(255,107,94,.25); }
 
   .clickable{ cursor:pointer; border-bottom: 1px dotted var(--muted); }
   .clickable:hover{ color: var(--accent-info); border-bottom-color: var(--accent-info); }
@@ -345,7 +353,7 @@
         <thead>
           <tr>
             <th>Zeit</th><th>Methode</th><th>Host</th><th>Pfad</th><th>Status</th>
-            <th>Quell-IP</th><th>Land</th><th>User</th><th>Auth</th><th>Grund</th>
+            <th>Quell-IP</th><th>Land</th><th>Provider (AS)</th><th>User</th><th>Auth</th><th>Grund</th>
           </tr>
         </thead>
         <tbody id="events-body"></tbody>
@@ -549,6 +557,20 @@ let charts = {};
 // which is then applied to every panel (KPIs, charts, table) simultaneously.
 let filters = { host: null, country: null, ip: null, asn: null, asn_label: null, status: null, bucket: null, status_code: null, reason: null, path: null, city: null, user_id: null };
 
+// Keys currently inverted ("NICHT X" statt "X") - Klick auf den Chip-Text (nicht
+// das X) togglet ein/aus, ebenso Strg/Cmd-Klick auf einen sonst normal
+// klickbaren Wert in einer Tabelle/Chart. asn_label ist kein eigener Backend-
+// Filter (nur Anzeige neben asn), taucht deshalb hier nie auf.
+let excludedFilters = new Set();
+const BACKEND_FILTER_KEYS = new Set(["host","country","ip","asn","status","bucket","status_code","reason","path","city","user_id"]);
+
+function applyExcludeState(keys, exclude){
+  keys.forEach(k => {
+    if(!BACKEND_FILTER_KEYS.has(k)) return;
+    if(exclude) excludedFilters.add(k); else excludedFilters.delete(k);
+  });
+}
+
 // Filter-Keys, die ein eigenes Steuerelement in der "Filter (gesamte Seite)"-Zeile
 // haben - beim Setzen/Loeschen per Chart-Klick oder Chip-X muss deren Wert im UI
 // nachgezogen werden, sonst zeigt das Dropdown/Feld den alten Stand.
@@ -635,9 +657,68 @@ function cityLabel(cityName, countryCode){
   return `${cityName} (${countryCode})`;
 }
 
-function setFilter(key, value){
-  filters[key] = (filters[key] === value) ? null : value;
+// Provider-Zelle (Netz-/Hosting-Provider aus der ASN) - gemeinsam fuer die
+// Events- und beide CrowdSec-Tabellen, damit ein Klick ueberall gleich den
+// ASN-Kombi-Filter (Nummer + Anzeigename) setzt statt nur reinen Text zu zeigen.
+function asnCellHtml(asNumber, asName){
+  if(!asNumber) return "–";
+  const label = asName ? `AS${escapeHtml(String(asNumber))} ${escapeHtml(asName)}` : `AS${escapeHtml(String(asNumber))}`;
+  return `<span class="clickable" data-filter-key="asn" data-filter-value="${escapeHtml(String(asNumber))}" data-asn-label="${escapeHtml(asName || "")}">${label}</span>`;
+}
+
+// Lange User-IDs (meist UUIDs/Hashes) sprengen sonst die Spaltenbreite der
+// Events-Tabelle, obwohl es in der Praxis nur eine Handvoll unterschiedliche
+// User gibt - deshalb ein deterministisches Symbol pro eindeutigem Wert statt
+// des Rohtexts, der Klartext bleibt per Tooltip (title) erreichbar.
+const USER_SYMBOLS = ["👤","🧑‍💻","🦊","🐙","🐧","🦉","🐝","🦋","🐢","🦄","🐬","🦁","🐳","🦖","🐺","🦅","🐨","🦔","🐍","🦈","🦇","🐫","🦓","🦒"];
+function hashString(str){
+  let h = 0;
+  for(let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+function userSymbol(userId){
+  return USER_SYMBOLS[hashString(userId) % USER_SYMBOLS.length];
+}
+function userCellHtml(userId){
+  if(!userId) return "";
+  const symbol = userSymbol(userId);
+  return `<span class="clickable" data-filter-key="user_id" data-filter-value="${escapeHtml(userId)}" title="${escapeHtml(userId)}">${symbol}</span>`;
+}
+
+// value=null loescht den Filter (wie bisher). exclude=true setzt ihn invertiert
+// ("NICHT value") statt normal - kommt vom Strg/Cmd-Klick auf einen klickbaren
+// Wert. Erneutes Klicken desselben Werts im selben Modus loescht ihn wieder,
+// im jeweils anderen Modus wechselt es nur den Modus statt zu loeschen.
+function setFilter(key, value, exclude=false){
+  if(filters[key] === value && excludedFilters.has(key) === exclude){
+    filters[key] = null;
+    excludedFilters.delete(key);
+  } else {
+    filters[key] = value;
+    applyExcludeState([key], exclude);
+  }
   syncFilterInput(key);
+  renderFilterChips();
+  refreshAll();
+}
+
+// Wie setFilter(), aber fuer Kombi-Filter, die mehrere Felder gleichzeitig
+// setzen (ASN-Zahl + Anzeigename, Host + Pfad) und deshalb nicht ueber das
+// einfache Toggle-Verhalten von setFilter() laufen koennen.
+function setFilters(assignments, exclude=false){
+  Object.assign(filters, assignments);
+  applyExcludeState(Object.keys(assignments), exclude);
+  Object.keys(assignments).forEach(syncFilterInput);
+  renderFilterChips();
+  refreshAll();
+}
+
+// Chip-Text (nicht das X) anklicken: behaelt den Filterwert, dreht ihn aber von
+// Include auf Exclude um (oder zurueck) - die vom Nutzer gewuenschte "diesen
+// Wert explizit ausschliessen"-Aktion ueber die Statusleiste.
+function toggleExclude(key){
+  if(filters[key] === null || filters[key] === undefined) return;
+  if(excludedFilters.has(key)) excludedFilters.delete(key); else excludedFilters.add(key);
   renderFilterChips();
   refreshAll();
 }
@@ -645,12 +726,14 @@ function setFilter(key, value){
 function clearFilter(key){
   if(key === "all"){
     Object.keys(filters).forEach(k => filters[k] = null);
+    excludedFilters.clear();
     Object.keys(FILTER_INPUT_IDS).forEach(syncFilterInput);
     if(currentRange === "custom") resetToDefaultRange();
   } else if(key === "range"){
     resetToDefaultRange();
   } else {
     filters[key] = null;
+    excludedFilters.delete(key);
     if(key === "asn") filters.asn_label = null;
     syncFilterInput(key);
   }
@@ -658,15 +741,22 @@ function clearFilter(key){
   refreshAll();
 }
 
-function chipHtml(key, label, displayValue){
-  return `<span class="chip" data-key="${key}"><span>${label}: <b>${displayValue}</b></span><button type="button" data-clear="${key}">✕</button></span>`;
+function chipHtml(key, label, displayValue, excludable=true){
+  const excluded = excludable && excludedFilters.has(key);
+  const cls = excluded ? "chip chip-exclude" : "chip";
+  const toggleAttr = excludable ? ` data-toggle-exclude="${key}"` : "";
+  const title = !excludable ? "" : excluded
+    ? ` title="Klicken, um diesen Filter wieder einzuschliessen"`
+    : ` title="Klicken, um diesen Filter auszuschliessen (NICHT)"`;
+  const prefix = excluded ? "🚫 " : "";
+  return `<span class="${cls}" data-key="${key}"><span class="chip-value"${toggleAttr}${title}>${prefix}${label}: <b>${displayValue}</b></span><button type="button" data-clear="${key}">✕</button></span>`;
 }
 
 function renderFilterChips(){
   const el = document.getElementById("active-filters");
   const chips = [];
   if(currentRange === "custom" && customRangeFrom && customRangeTo){
-    chips.push(chipHtml("range", "Zeitraum", `${fmtTime(customRangeFrom)} – ${fmtTime(customRangeTo)}`));
+    chips.push(chipHtml("range", "Zeitraum", `${fmtTime(customRangeFrom)} – ${fmtTime(customRangeTo)}`, false));
   }
   if(filters.country) chips.push(chipHtml("country", "Land", countryLabel(filters.country)));
   if(filters.host) chips.push(chipHtml("host", "Host", filters.host));
@@ -678,7 +768,7 @@ function renderFilterChips(){
   if(filters.reason) chips.push(chipHtml("reason", "Grund", filters.reason));
   if(filters.path) chips.push(chipHtml("path", "Pfad", filters.path));
   if(filters.city) chips.push(chipHtml("city", "Stadt", filters.city));
-  if(filters.user_id) chips.push(chipHtml("user_id", "User", filters.user_id));
+  if(filters.user_id) chips.push(chipHtml("user_id", "User", `${userSymbol(filters.user_id)} ${escapeHtml(filters.user_id)}`));
   if(chips.length > 1) chips.push(`<span class="chip clear-all" data-clear="all">Alle Filter zurücksetzen ✕</span>`);
   el.innerHTML = chips.join("");
   document.getElementById("filter-bar").classList.toggle("has-filters", chips.length > 0);
@@ -699,6 +789,7 @@ function appendFilterParams(params){
   if(filters.path) params.set("path", filters.path);
   if(filters.city) params.set("city", filters.city);
   if(filters.user_id) params.set("user_id", filters.user_id);
+  if(excludedFilters.size) params.set("exclude", Array.from(excludedFilters).join(","));
 }
 
 // Gemeinsam mit buildParams() und loadCrowdsecHistory(), damit der eingestellte
@@ -733,9 +824,32 @@ function formatMs(ms){
 
 document.getElementById("active-filters").addEventListener("click", (ev) => {
   const btn = ev.target.closest("[data-clear]");
-  if(!btn) return;
-  clearFilter(btn.dataset.clear);
+  if(btn){ clearFilter(btn.dataset.clear); return; }
+  const toggleEl = ev.target.closest("[data-toggle-exclude]");
+  if(toggleEl) toggleExclude(toggleEl.dataset.toggleExclude);
 });
+
+// Gemeinsamer Klick-Handler fuer alle "[data-filter-key]"-Werte (Tabellenzellen,
+// Anomalie-Buttons): normaler Klick = Include-Filter, Strg/Cmd-Klick = Exclude
+// ("NICHT diesen Wert"). ASN ist ein Kombi-Filter (Nummer + Anzeigename), daher
+// der Sonderfall statt eines einfachen setFilter().
+// Chart.js liefert im onClick-Callback das native Browser-MouseEvent unter
+// evt.native - darueber laesst sich Strg/Cmd-Klick auch auf Chart-Segmenten
+// erkennen (gleiche Exclude-Geste wie bei Tabellenzellen).
+function chartExclude(evt){
+  return !!(evt && evt.native && (evt.native.ctrlKey || evt.native.metaKey));
+}
+
+function handleFilterClick(el, ev){
+  const key = el.dataset.filterKey;
+  const value = el.dataset.filterValue;
+  const exclude = !!(ev.ctrlKey || ev.metaKey);
+  if(key === "asn"){
+    setFilters({ asn: value, asn_label: el.dataset.asnLabel || "" }, exclude);
+  } else {
+    setFilter(key, value, exclude);
+  }
+}
 
 function fmtTime(ts){
   try{
@@ -825,7 +939,7 @@ function ensureWorldMap(){
         tooltip.text(`${tooltip.text()}: ${n.toLocaleString("de-CH")} Requests`, true);
       },
       onRegionClick(event, code){
-        setFilter("country", code);
+        setFilter("country", code, event.ctrlKey || event.metaKey);
       },
     });
   }catch(e){
@@ -888,7 +1002,7 @@ function renderAnomalies(anomalies){
 document.getElementById("anomalies").addEventListener("click", (ev) => {
   const el = ev.target.closest("[data-filter-key]");
   if(!el) return;
-  setFilter(el.dataset.filterKey, el.dataset.filterValue);
+  handleFilterClick(el, ev);
 });
 
 const REQUEST_SCALE_LOW = [0x1b, 0x25, 0x32];   // #1b2532, wenig Requests
@@ -1001,7 +1115,7 @@ async function loadStats(){
     },
     options: baseOptions({ scales:{}, onClick: (evt, elements) => {
       if(!elements.length) return;
-      setFilter("bucket", data.status_buckets[elements[0].index].bucket);
+      setFilter("bucket", data.status_buckets[elements[0].index].bucket, chartExclude(evt));
     } })
   });
 
@@ -1015,7 +1129,7 @@ async function loadStats(){
     },
     options: baseOptions({ indexAxis:"y", plugins:{legend:{display:false}}, onClick: (evt, elements) => {
       if(!elements.length) return;
-      setFilter("country", data.countries[elements[0].index].country_code);
+      setFilter("country", data.countries[elements[0].index].country_code, chartExclude(evt));
     } })
   });
 
@@ -1029,7 +1143,7 @@ async function loadStats(){
     },
     options: baseOptions({ indexAxis:"y", plugins:{legend:{display:false}}, onClick: (evt, elements) => {
       if(!elements.length) return;
-      setFilter("host", data.hosts[elements[0].index].host);
+      setFilter("host", data.hosts[elements[0].index].host, chartExclude(evt));
     } })
   });
 
@@ -1121,7 +1235,7 @@ async function loadStats(){
       },
       onClick: (evt, elements) => {
         if(!elements.length) return;
-        setFilter("host", data.traffic_hosts[elements[0].index].host);
+        setFilter("host", data.traffic_hosts[elements[0].index].host, chartExclude(evt));
       }
     })
   }));
@@ -1135,7 +1249,7 @@ async function loadStats(){
     },
     options: baseOptions({ indexAxis:"y", plugins:{legend:{display:false}}, onClick: (evt, elements) => {
       if(!elements.length) return;
-      setFilter("ip", data.top_ips[elements[0].index].source_ip);
+      setFilter("ip", data.top_ips[elements[0].index].source_ip, chartExclude(evt));
     } })
   }));
 
@@ -1151,10 +1265,7 @@ async function loadStats(){
     options: baseOptions({ indexAxis:"y", plugins:{legend:{display:false}}, onClick: (evt, elements) => {
       if(!elements.length) return;
       const item = data.top_asns[elements[0].index];
-      filters.asn = item.as_number;
-      filters.asn_label = item.as_name;
-      renderFilterChips();
-      refreshAll();
+      setFilters({ asn: item.as_number, asn_label: item.as_name }, chartExclude(evt));
     } })
   }));
 
@@ -1167,7 +1278,7 @@ async function loadStats(){
     },
     options: baseOptions({ indexAxis:"y", plugins:{legend:{display:false}}, onClick: (evt, elements) => {
       if(!elements.length) return;
-      setFilter("user_id", data.top_users[elements[0].index].user_id);
+      setFilter("user_id", data.top_users[elements[0].index].user_id, chartExclude(evt));
     } })
   }));
 
@@ -1194,10 +1305,7 @@ async function loadStats(){
     options: baseOptions({ indexAxis:"y", plugins:{legend:{display:false}}, onClick: (evt, elements) => {
       if(!elements.length) return;
       const item = data.top_paths[elements[0].index];
-      filters.host = item.host;
-      filters.path = item.path;
-      renderFilterChips();
-      refreshAll();
+      setFilters({ host: item.host, path: item.path }, chartExclude(evt));
     } })
   }));
 
@@ -1210,7 +1318,7 @@ async function loadStats(){
     },
     options: baseOptions({ indexAxis:"y", plugins:{legend:{display:false}}, onClick: (evt, elements) => {
       if(!elements.length) return;
-      setFilter("city", data.top_cities[elements[0].index].city_name);
+      setFilter("city", data.top_cities[elements[0].index].city_name, chartExclude(evt));
     } })
   }));
 
@@ -1224,22 +1332,19 @@ async function loadStats(){
 document.getElementById("reasons-body").addEventListener("click", (ev) => {
   const el = ev.target.closest("[data-filter-key]");
   if(!el) return;
-  setFilter(el.dataset.filterKey, el.dataset.filterValue);
+  handleFilterClick(el, ev);
 });
 
 document.getElementById("slowest-body").addEventListener("click", (ev) => {
   const el = ev.target.closest("[data-filter-key]");
   if(!el) return;
-  setFilter(el.dataset.filterKey, el.dataset.filterValue);
+  handleFilterClick(el, ev);
 });
 
 document.getElementById("slow-endpoints-body").addEventListener("click", (ev) => {
   const el = ev.target.closest("[data-host]");
   if(!el) return;
-  filters.host = el.dataset.host;
-  filters.path = el.dataset.path;
-  renderFilterChips();
-  refreshAll();
+  setFilters({ host: el.dataset.host, path: el.dataset.path }, ev.ctrlKey || ev.metaKey);
 });
 
 async function loadEvents(){
@@ -1260,6 +1365,8 @@ async function loadEvents(){
     const hostCell = e.host ? `<span class="clickable" data-filter-key="host" data-filter-value="${escapeHtml(e.host)}">${escapeHtml(e.host)}</span>` : "";
     const ipCell = e.source_ip ? `<span class="clickable" data-filter-key="ip" data-filter-value="${escapeHtml(e.source_ip)}">${escapeHtml(e.source_ip)}</span>` : "";
     const countryCell = e.country_code ? `<span class="clickable" data-filter-key="country" data-filter-value="${escapeHtml(e.country_code)}">${countryLabel(e.country_code)}</span>` : "";
+    const asnCell = asnCellHtml(e.as_number, e.as_name);
+    const userCell = userCellHtml(e.user_id);
     // metadata.crowdsec_verdict ist extrem selten (~100 von 300k Requests) - NetBird
     // proxys eigener Bouncer-Check-Ausgang pro Request, kein eigenes Reason-Feld,
     // deshalb hier nur als Zusatz-Badge neben dem Deny-Grund statt eigener Spalte.
@@ -1276,17 +1383,18 @@ async function loadEvents(){
       <td>${statusBadge}</td>
       <td>${ipCell}</td>
       <td>${countryCell}</td>
-      <td>${escapeHtml(e.user_id || "")}</td>
+      <td>${asnCell}</td>
+      <td>${userCell}</td>
       <td>${escapeHtml(e.auth_method_used || "")}</td>
       <td>${denied ? `<span class="badge deny">${escapeHtml(e.reason)}</span>` : ""}${csVerdictBadge}</td>
     </tr>`;
-  }).join("") || `<tr><td colspan="10" style="color:var(--muted)">Keine Events gefunden</td></tr>`;
+  }).join("") || `<tr><td colspan="11" style="color:var(--muted)">Keine Events gefunden</td></tr>`;
 }
 
 document.getElementById("events-body").addEventListener("click", (ev) => {
   const el = ev.target.closest("[data-filter-key]");
   if(!el) return;
-  setFilter(el.dataset.filterKey, el.dataset.filterValue);
+  handleFilterClick(el, ev);
 });
 
 async function loadCrowdsecCurrent(){
@@ -1312,8 +1420,8 @@ async function loadCrowdsecCurrent(){
       const ip = escapeHtml(d.source_ip || "");
       return `<tr>
         <td><span class="clickable" data-filter-key="ip" data-filter-value="${ip}">${ip}</span></td>
-        <td>${d.country_code ? countryLabel(d.country_code) : "–"}</td>
-        <td>${escapeHtml(d.as_name || "–")}</td>
+        <td>${d.country_code ? `<span class="clickable" data-filter-key="country" data-filter-value="${escapeHtml(d.country_code)}">${countryLabel(d.country_code)}</span>` : "–"}</td>
+        <td>${asnCellHtml(d.as_number, d.as_name)}</td>
         <td>${crowdsecReasonIconsHtml(d.scenarios || [])}</td>
         <td>${d.events_count ?? "–"}</td>
         <td>${escapeHtml(fmtTime(d.first_seen))}</td>
@@ -1332,7 +1440,7 @@ async function loadCrowdsecCurrent(){
 
 document.getElementById("crowdsec-current-body").addEventListener("click", async (ev) => {
   const filterEl = ev.target.closest("[data-filter-key]");
-  if(filterEl){ setFilter(filterEl.dataset.filterKey, filterEl.dataset.filterValue); return; }
+  if(filterEl){ handleFilterClick(filterEl, ev); return; }
 
   const btn = ev.target.closest("[data-action]");
   if(!btn) return;
@@ -1391,8 +1499,8 @@ async function loadCrowdsecHistory(){
       return `<tr>
         <td>${escapeHtml(fmtTime(a.created_at))}</td>
         <td><span class="clickable" data-filter-key="ip" data-filter-value="${escapeHtml(a.source_ip)}">${escapeHtml(a.source_ip || "")}</span></td>
-        <td>${a.country_code ? countryLabel(a.country_code) : "–"}</td>
-        <td>${escapeHtml(a.as_name || "–")}</td>
+        <td>${a.country_code ? `<span class="clickable" data-filter-key="country" data-filter-value="${escapeHtml(a.country_code)}">${countryLabel(a.country_code)}</span>` : "–"}</td>
+        <td>${asnCellHtml(a.as_number, a.as_name)}</td>
         <td>${escapeHtml(crowdsecReasonLabel(a.scenario))}</td>
         <td>${a.events_count ?? "–"}</td>
         <td>${statusBadge}</td>
@@ -1407,7 +1515,7 @@ async function loadCrowdsecHistory(){
 document.getElementById("crowdsec-history-body").addEventListener("click", (ev) => {
   const el = ev.target.closest("[data-filter-key]");
   if(!el) return;
-  setFilter(el.dataset.filterKey, el.dataset.filterValue);
+  handleFilterClick(el, ev);
 });
 document.getElementById("cs-search").addEventListener("input", () => { clearTimeout(window._cst); window._cst = setTimeout(loadCrowdsecHistory, 300); });
 
