@@ -1,6 +1,10 @@
 type: leaky
 name: netbird-proxy/error-flood
-description: "Häufung von Backend-Fehlern derselben IP - deutet auf systematisches Scannen hin"
+description: >
+  Häufung von Backend-Fehlern derselben IP - deutet auf systematisches
+  Scannen hin. Nur Sichtbarkeit, keine automatische Sperrung: 502er haeufen
+  sich auch bei legitimem Traffic waehrend Backend-Deployments/Restarts,
+  was wiederholt zu False-Positive-Bans gefuehrt hat.
 filter: "evt.Meta.log_type == 'netbird-proxy-error'"
 leakspeed: "30s"
 capacity: 15
@@ -9,4 +13,4 @@ blackhole: 5m
 labels:
   service: http
   type: scan
-  remediation: true
+  remediation: false
