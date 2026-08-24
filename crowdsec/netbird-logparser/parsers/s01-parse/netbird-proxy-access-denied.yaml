@@ -15,9 +15,13 @@ statics:
     value: netbird-proxy-access-denied
   - meta: source_ip
     expression: "evt.Parsed.source_ip"
+  - meta: target_host
+    expression: "evt.Parsed.target_host"
   - meta: http_path
     expression: "evt.Parsed.http_path"
   - meta: http_method
     expression: "evt.Parsed.http_method"
+  - meta: http_status
+    expression: "evt.Parsed.http_status"
   - meta: deny_reason
     expression: "evt.Parsed.deny_reason"

@@ -5,8 +5,19 @@ description: >
   gehosteten Domains - deutet auf systematisches Scannen hin. Ergaenzt
   netbird-proxy/error-flood (das nur echte Backend-Verbindungsfehler sieht,
   z.B. 502 waehrend eines Deployments) um Sichtbarkeit auf tatsaechlich vom
-  Proxy abgelehnte/nicht gefundene Requests, quer durch alle Hosts.
-filter: "evt.Meta.log_type == 'netbird-proxy-access-denied' && evt.Meta.deny_reason == 'Request failed'"
+  Proxy abgelehnte/nicht gefundene Requests, quer durch alle Hosts. Beispiel
+  fuer eine Ausnahme (Platzhalter-Domain, im eigenen Deployment durch die
+  echte(n) Domain(s) ersetzen): ein Upload-Client, der nach Ablauf einer
+  Upload-Session per POST /upload/<id>/ping weiterpollt und dabei
+  minutenlang 410 Gone bekommt - kein Scan, sondern eine haengende
+  Client-Session (beobachtet als wiederholte False-Positive-Bans).
+filter: >
+  evt.Meta.log_type == 'netbird-proxy-access-denied' &&
+  evt.Meta.deny_reason == 'Request failed' &&
+  !(evt.Meta.http_method == 'POST' &&
+    evt.Meta.http_status == '410' &&
+    (evt.Meta.target_host == 'bildaustausch.example.com' || evt.Meta.target_host == 'bildaustausch-dev.example.com') &&
+    evt.Meta.http_path matches '^/upload/[^/]+/ping$')
 leakspeed: "60s"
 capacity: 40
 groupby: "evt.Meta.source_ip"
