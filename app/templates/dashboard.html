@@ -257,6 +257,16 @@
   .reason-legend-label{ text-transform:uppercase; letter-spacing:.06em; }
   .reason-icons{ display:flex; gap:4px; flex-wrap:wrap; }
 
+  /* Manche Hosts (z.B. Homarr's gebündelte tRPC-Widget-Pings) liefern Pfade
+     mit hunderten Zeichen und vielen Kommas - ohne nowrap bricht der Browser
+     dort an jedem Komma um und eine einzelne Tabellenzeile wird dutzende
+     Zeilen hoch, was die ganze Tabelle trotz max-height winzig und "endlos"
+     wirken laesst. Ellipsis statt Umbruch haelt die Zeilenhoehe konstant. */
+  .path-cell{
+    display:inline-block; max-width:420px; overflow:hidden; text-overflow:ellipsis;
+    white-space:nowrap; vertical-align:bottom;
+  }
+
   .mini-kpis{ display:flex; gap:18px; margin-bottom:12px; }
   .mini-kpi .label{ color: var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.07em; }
   .mini-kpi .value{ font-family: var(--mono); font-size:18px; font-weight:600; }
@@ -1264,7 +1274,7 @@ async function loadStats(){
   slowEndpointsBody.innerHTML = data.slow_endpoints.length
     ? data.slow_endpoints.map(r => `<tr>
         <td><span class="clickable" data-host="${escapeHtml(r.host)}" data-path="${escapeHtml(r.path)}">${escapeHtml(r.host || "")}</span></td>
-        <td><span class="clickable" data-host="${escapeHtml(r.host)}" data-path="${escapeHtml(r.path)}">${escapeHtml(r.path || "")}</span></td>
+        <td><span class="clickable path-cell" data-host="${escapeHtml(r.host)}" data-path="${escapeHtml(r.path)}" title="${escapeHtml(r.path || "")}">${escapeHtml(r.path || "")}</span></td>
         <td>${formatMs(r.avg_ms)}</td>
         <td>${r.n.toLocaleString("de-CH")}</td>
       </tr>`).join("")
@@ -1432,7 +1442,7 @@ async function loadEvents(){
       <td>${escapeHtml(fmtTime(e.timestamp))}</td>
       <td>${escapeHtml(e.method || (e.protocol||"").toUpperCase())}</td>
       <td>${hostCell}</td>
-      <td>${escapeHtml(e.path || "")}</td>
+      <td><span class="path-cell" title="${escapeHtml(e.path || "")}">${escapeHtml(e.path || "")}</span></td>
       <td>${statusBadge}</td>
       <td>${ipCell}</td>
       <td>${countryCell}</td>
