@@ -256,7 +256,6 @@
   }
   .reason-legend-label{ text-transform:uppercase; letter-spacing:.06em; }
   .reason-icons{ display:flex; gap:4px; flex-wrap:wrap; }
-  .reason-icons span{ cursor:default; }
 
   .mini-kpis{ display:flex; gap:18px; margin-bottom:12px; }
   .mini-kpi .label{ color: var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.07em; }
@@ -367,13 +366,13 @@
     <div class="mini-kpis">
       <div class="mini-kpi"><div class="label">Aktive Blocks</div><div class="value" id="cs-active-count">–</div></div>
     </div>
-    <div class="reason-legend">
-      <span class="reason-legend-label">Symbole:</span>
-      <span>🔑 Auth Brute-Force</span>
-      <span>🚫 Zugriffsverweigerungs-Flut</span>
-      <span>🔍 Scan sensibler Pfade</span>
-      <span>💥 Fehler-Flut</span>
-      <span>🛡️ Portscan (Firewall)</span>
+    <div class="reason-legend" id="cs-reason-legend">
+      <span class="reason-legend-label">Symbole (anklicken zum Filtern):</span>
+      <span class="clickable" data-filter-key="cs_scenario" data-filter-value="netbird-proxy/auth-bruteforce">🔑 Auth Brute-Force</span>
+      <span class="clickable" data-filter-key="cs_scenario" data-filter-value="netbird-proxy/access-denied-flood">🚫 Zugriffsverweigerungs-Flut</span>
+      <span class="clickable" data-filter-key="cs_scenario" data-filter-value="netbird-proxy/sensitive-path-scan">🔍 Scan sensibler Pfade</span>
+      <span class="clickable" data-filter-key="cs_scenario" data-filter-value="netbird-proxy/error-flood">💥 Fehler-Flut</span>
+      <span class="clickable" data-filter-key="cs_scenario" data-filter-value="firewallservices/pf-scan-multi_ports">🛡️ Portscan (Firewall)</span>
     </div>
     <div class="table-wrap" style="max-height:280px;">
       <table>
@@ -559,8 +558,13 @@ let charts = {};
 // <select>/<input> in the filter row, not by additive clicking) - every other
 // key is an array so several values (e.g. DE + CH) apply additively/"OR"'d
 // together, per-key either all included or all excluded (see excludedFilters).
-let filters = { host: [], country: [], ip: [], asn: [], status: null, bucket: null, status_code: null, reason: [], path: [], city: [], user_id: [] };
-const MULTI_VALUE_KEYS = new Set(["host","country","ip","asn","reason","path","city","user_id"]);
+// cs_scenario ist der CrowdSec-Blockgrund (Szenario) - eigener Filter statt
+// eine Wiederverwendung von "reason" (das ist der Proxy-Deny-Grund auf
+// proxy_events, ein anderes Feld auf einer anderen Tabelle). Wird nur an die
+// beiden CrowdSec-Endpunkte durchgereicht, /api/stats und /api/events
+// ignorieren einen ihnen unbekannten Query-Param einfach.
+let filters = { host: [], country: [], ip: [], asn: [], status: null, bucket: null, status_code: null, reason: [], path: [], city: [], user_id: [], cs_scenario: [] };
+const MULTI_VALUE_KEYS = new Set(["host","country","ip","asn","reason","path","city","user_id","cs_scenario"]);
 // AS-Nummer -> Anzeigename, nur fuer Chip-/Legenden-Anzeige - kein eigener
 // Backend-Filter (im Unterschied zu asn selbst), deshalb separat statt in
 // `filters` und ohne Gegenstueck in BACKEND_FILTER_KEYS/appendFilterParams.
@@ -571,7 +575,7 @@ let asnLabels = {};
 // klickbaren Wert in einer Tabelle/Chart. Gilt fuer den gesamten Wertesatz
 // eines Keys auf einmal, nicht pro Einzelwert (siehe toggleFilterValue()).
 let excludedFilters = new Set();
-const BACKEND_FILTER_KEYS = new Set(["host","country","ip","asn","status","bucket","status_code","reason","path","city","user_id"]);
+const BACKEND_FILTER_KEYS = new Set(["host","country","ip","asn","status","bucket","status_code","reason","path","city","user_id","cs_scenario"]);
 
 function applyExcludeState(keys, exclude){
   keys.forEach(k => {
@@ -616,7 +620,7 @@ const CROWDSEC_SCENARIO_ICONS = {
 };
 function crowdsecReasonIconsHtml(scenarios){
   return `<span class="reason-icons">${scenarios.map(s =>
-    `<span title="${escapeHtml(crowdsecReasonLabel(s))}">${CROWDSEC_SCENARIO_ICONS[s] || "❔"}</span>`
+    `<span class="clickable" data-filter-key="cs_scenario" data-filter-value="${escapeHtml(s)}" title="${escapeHtml(crowdsecReasonLabel(s))}">${CROWDSEC_SCENARIO_ICONS[s] || "❔"}</span>`
   ).join("")}</span>`;
 }
 function formatDurationShort(seconds){
@@ -815,6 +819,7 @@ function renderFilterChips(){
   if(filters.path.length) chips.push(chipHtml("path", "Pfad", filters.path.map(escapeHtml).join(", ")));
   if(filters.city.length) chips.push(chipHtml("city", "Stadt", filters.city.map(escapeHtml).join(", ")));
   if(filters.user_id.length) chips.push(chipHtml("user_id", "User", filters.user_id.map(u => `${userSymbol(u)} ${escapeHtml(u)}`).join(", ")));
+  if(filters.cs_scenario.length) chips.push(chipHtml("cs_scenario", "CrowdSec-Grund", filters.cs_scenario.map(s => `${CROWDSEC_SCENARIO_ICONS[s] || "❔"} ${escapeHtml(crowdsecReasonLabel(s))}`).join(", ")));
   if(chips.length > 1) chips.push(`<span class="chip clear-all" data-clear="all">Alle Filter zurücksetzen ✕</span>`);
   el.innerHTML = chips.join("");
   document.getElementById("filter-bar").classList.toggle("has-filters", chips.length > 0);
@@ -835,6 +840,7 @@ function appendFilterParams(params){
   if(filters.path.length) params.set("path", filters.path.join(","));
   if(filters.city.length) params.set("city", filters.city.join(","));
   if(filters.user_id.length) params.set("user_id", filters.user_id.join(","));
+  if(filters.cs_scenario.length) params.set("cs_scenario", filters.cs_scenario.join(","));
   if(excludedFilters.size) params.set("exclude", Array.from(excludedFilters).join(","));
 }
 
@@ -1485,6 +1491,12 @@ async function loadCrowdsecCurrent(){
   }
 }
 
+document.getElementById("cs-reason-legend").addEventListener("click", (ev) => {
+  const el = ev.target.closest("[data-filter-key]");
+  if(!el) return;
+  handleFilterClick(el, ev);
+});
+
 document.getElementById("crowdsec-current-body").addEventListener("click", async (ev) => {
   const filterEl = ev.target.closest("[data-filter-key]");
   if(filterEl){ handleFilterClick(filterEl, ev); return; }
@@ -1548,7 +1560,7 @@ async function loadCrowdsecHistory(){
         <td><span class="clickable" data-filter-key="ip" data-filter-value="${escapeHtml(a.source_ip)}">${escapeHtml(a.source_ip || "")}</span></td>
         <td>${a.country_code ? `<span class="clickable" data-filter-key="country" data-filter-value="${escapeHtml(a.country_code)}">${countryLabel(a.country_code)}</span>` : "–"}</td>
         <td>${asnCellHtml(a.as_number, a.as_name)}</td>
-        <td>${escapeHtml(crowdsecReasonLabel(a.scenario))}</td>
+        <td>${a.scenario ? `<span class="clickable" data-filter-key="cs_scenario" data-filter-value="${escapeHtml(a.scenario)}">${escapeHtml(crowdsecReasonLabel(a.scenario))}</span>` : "–"}</td>
         <td>${a.events_count ?? "–"}</td>
         <td>${statusBadge}</td>
       </tr>`;

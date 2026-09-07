@@ -946,6 +946,25 @@ def apply_common_filters(args, where_clauses, params):
     add_multi("city", city, city_clause)
 
 
+def apply_crowdsec_scenario_filter(args, where_clauses, params):
+    """Filters crowdsec_alerts.scenario (the block reason shown as icons in
+    the current-bans table and as text in the ban history) - kept separate
+    from apply_common_filters since proxy_events has no equivalent column, so
+    it only applies to the two /api/crowdsec/* endpoints that call it.
+
+    Supports the same comma-separated multi-value + exclude=cs_scenario
+    semantics as the fields in apply_common_filters (additive OR, "IS NOT
+    TRUE" instead of NOT(...) so a NULL scenario isn't dropped from both
+    sides of an exclude)."""
+    values = [v.strip() for v in args.get("cs_scenario", "").split(",") if v.strip()]
+    if not values:
+        return
+    clause = "scenario IN (" + ",".join("?" for _ in values) + ")"
+    exclude = {k for k in args.get("exclude", "").split(",") if k}
+    where_clauses.append(f"({clause}) IS NOT TRUE" if "cs_scenario" in exclude else clause)
+    params.extend(values)
+
+
 def crowdsec_source_ip_filter(args, cutoff=None, until=None):
     """Links the page's cross-filters to the CrowdSec tables.
 
@@ -1329,6 +1348,7 @@ def api_crowdsec_current():
     if ip_filter:
         where_clauses.append(ip_filter)
         params.extend(ip_params)
+    apply_crowdsec_scenario_filter(request.args, where_clauses, params)
     rows = conn.execute(
         f"""
         SELECT * FROM crowdsec_alerts
@@ -1384,6 +1404,7 @@ def api_crowdsec_history():
         params.append(until)
     if search:
         apply_search(search, where_clauses, params, fields=CROWDSEC_SEARCH_FIELDS)
+    apply_crowdsec_scenario_filter(request.args, where_clauses, params)
     ip_filter, ip_params = crowdsec_source_ip_filter(request.args, cutoff=cutoff, until=until)
     if ip_filter:
         where_clauses.append(ip_filter)
