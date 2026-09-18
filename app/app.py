@@ -62,6 +62,14 @@ ASN_MMDB_URL = os.environ.get(
 ASN_MMDB_PATH = os.path.join(os.path.dirname(DB_PATH) or ".", "GeoLite2-ASN.mmdb")
 ASN_REFRESH_INTERVAL_SECONDS = 7 * 24 * 3600  # woechentlich, wie CrowdSecs eigener Hub-Refresh
 
+# Bekannte Schweizer/deutsche Consumer-ISPs, deren Endkunden-IPs immer wieder
+# durch dynamische Neuvergabe eine von CrowdSec vorher gebannte IP erben und
+# dadurch faelschlich als aktiv geblockt erscheinen, obwohl es sich um legitimen
+# Zugriff handelt. Erfordert ASN_ENRICHMENT_ENABLED (liefert as_name); ohne das
+# bleibt diese Warnung mangels Daten stumm.
+CROWDSEC_LIKELY_FP_COUNTRIES = ("DE", "CH")
+CROWDSEC_LIKELY_FP_ISP_KEYWORDS = ("bluewin", "sunrise", "telekom", "quickline", "salt")
+
 if not NB_API_BASE or not NB_API_TOKEN:
     log.warning(
         "NB_API_BASE oder NB_API_TOKEN ist nicht gesetzt - der Poller kann keine Daten abrufen."
@@ -1250,6 +1258,39 @@ def _compute_stats(args):
     if crowdsec_unavailable_count:
         anomalies.append({"type": "crowdsec_unavailable", "count": crowdsec_unavailable_count})
 
+    # Aktuell aktive Bans mit vermutlichem Fehlalarm-Muster (Land + ISP), siehe
+    # CROWDSEC_LIKELY_FP_*. Bewusst unabhaengig von der gewaehlten Zeitraum-/
+    # Cross-Filter-Auswahl der Seite - das ist eine globale "gerade jetzt
+    # blockiert"-Warnung, kein Report ueber das aktuelle Datenfenster. Eigenes
+    # Feld statt in anomalies, weil es im Frontend als staendig sichtbarer
+    # Banner statt im einklappbaren Anomalien-Dropdown erscheinen soll.
+    crowdsec_likely_fp = []
+    if CROWDSEC_CONFIGURED:
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        country_sql = " OR ".join("country_code = ?" for _ in CROWDSEC_LIKELY_FP_COUNTRIES)
+        isp_sql = " OR ".join("as_name LIKE ?" for _ in CROWDSEC_LIKELY_FP_ISP_KEYWORDS)
+        fp_rows = conn.execute(
+            f"""
+            SELECT source_ip, country_code, as_number, as_name,
+                   MAX(expires_at) expires_at, GROUP_CONCAT(DISTINCT scenario) scenarios
+            FROM crowdsec_alerts
+            WHERE expires_at IS NOT NULL AND expires_at > ?
+              AND ({country_sql})
+              AND ({isp_sql})
+            GROUP BY source_ip
+            ORDER BY expires_at DESC
+            """,
+            [now_iso, *CROWDSEC_LIKELY_FP_COUNTRIES, *[f"%{kw}%" for kw in CROWDSEC_LIKELY_FP_ISP_KEYWORDS]],
+        ).fetchall()
+        for r in fp_rows:
+            crowdsec_likely_fp.append({
+                "source_ip": r["source_ip"],
+                "country_code": r["country_code"],
+                "as_name": r["as_name"],
+                "scenarios": (r["scenarios"] or "").split(","),
+                "expires_at": r["expires_at"],
+            })
+
     conn.close()
 
     return dict(
@@ -1275,6 +1316,7 @@ def _compute_stats(args):
         slowest_events=slowest_events,
         slow_endpoints=slow_endpoints,
         anomalies=anomalies,
+        crowdsec_likely_fp=crowdsec_likely_fp,
     )
 
 

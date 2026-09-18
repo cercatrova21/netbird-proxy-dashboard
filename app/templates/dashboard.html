@@ -250,6 +250,23 @@
   }
   .anomaly button:hover{ color: var(--text); border-color: var(--muted); }
 
+  .fp-warning-bar{ display:none; flex-direction:column; gap:8px; margin: 14px 0; }
+  .fp-warning-bar.open{ display:flex; }
+  .fp-warning-item{
+    display:flex; align-items:center; gap:10px; padding:10px 14px; border-radius:8px;
+    font-family: var(--mono); font-size:13px; border:1px solid rgba(255,107,94,.4);
+    background: rgba(255,107,94,.08); color: var(--text);
+  }
+  .fp-warning-item .tag{
+    flex-shrink:0; font-size:10px; text-transform:uppercase; letter-spacing:.05em;
+    color: var(--accent-deny); border:1px solid var(--accent-deny); border-radius:4px; padding:1px 6px;
+  }
+  .fp-warning-item button{
+    margin-left:auto; background:none; border:1px solid var(--border); color: var(--muted);
+    border-radius:6px; padding:3px 8px; font-family: var(--mono); font-size:11px; cursor:pointer;
+  }
+  .fp-warning-item button:hover{ color: var(--text); border-color: var(--muted); }
+
   .reason-legend{
     display:flex; gap:14px; flex-wrap:wrap; align-items:center;
     color: var(--muted); font-family: var(--mono); font-size:11px; margin-bottom:12px;
@@ -295,6 +312,8 @@
 </div>
 
 <main>
+  <div id="crowdsec-fp-warning" class="fp-warning-bar"></div>
+
   <div class="toolbar">
     <div class="range-select" id="range-select">
       <button data-range="24h" class="active">24 Stunden</button>
@@ -304,6 +323,7 @@
       <button type="button" data-range="custom" id="range-custom-toggle">Zeitraum…</button>
     </div>
     <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+      <button type="button" class="btn" id="ch-quick-filter" title="Global nach Land Schweiz filtern">🇨🇭 Nur Schweiz</button>
       <button type="button" id="anomaly-toggle">
         <span>⚠ <span id="anomaly-count">0</span> Anomalien</span><span class="chevron">▾</span>
       </button>
@@ -833,7 +853,19 @@ function renderFilterChips(){
   if(chips.length > 1) chips.push(`<span class="chip clear-all" data-clear="all">Alle Filter zurücksetzen ✕</span>`);
   el.innerHTML = chips.join("");
   document.getElementById("filter-bar").classList.toggle("has-filters", chips.length > 0);
+  updateChQuickFilterButton();
 }
+
+// Spiegelt den Schweiz-Schnellfilter-Button als aktiv/inaktiv, egal ob CH ueber
+// den Button selbst, eine Land-Zelle oder einen Chart-Klick gesetzt wurde.
+function updateChQuickFilterButton(){
+  const active = filters.country.includes("CH") && !excludedFilters.has("country");
+  document.getElementById("ch-quick-filter").classList.toggle("primary", active);
+}
+
+document.getElementById("ch-quick-filter").addEventListener("click", () => {
+  setFilter("country", "CH");
+});
 
 // Gemeinsam mit buildParams() und den CrowdSec-Loadern, damit ein gesetzter
 // Cross-Filter (Chart-Klick, Chip, Tabellenzelle) auch die CrowdSec-Tabellen
@@ -1067,6 +1099,50 @@ document.getElementById("anomalies").addEventListener("click", (ev) => {
   handleFilterClick(el, ev);
 });
 
+// Staendig sichtbarer Banner ganz oben auf der Seite statt im einklappbaren
+// Anomalien-Dropdown, weil diese Warnung (moeglicher Fehlalarm bei bekanntem
+// CH/DE-Consumer-ISP) im Alltag nicht uebersehen werden soll - unabhaengig vom
+// gewaehlten Zeitraum/Filtern, siehe crowdsec_likely_fp in _compute_stats().
+function renderCrowdsecFpWarning(entries){
+  const el = document.getElementById("crowdsec-fp-warning");
+  el.classList.toggle("open", !!(entries && entries.length));
+  if(!entries || !entries.length){ el.innerHTML = ""; return; }
+  el.innerHTML = entries.map(e => {
+    const isp = e.as_name ? `, ${escapeHtml(e.as_name)}` : "";
+    return `<div class="fp-warning-item">
+      <span class="tag">ISP</span>
+      <span>Aktiver CrowdSec-Block für <b>${escapeHtml(e.source_ip)}</b> (${countryLabel(e.country_code)}${isp}) - moeglicherweise ein Fehlalarm bei einem bekannten CH/DE-Consumer-ISP</span>
+      <button type="button" data-filter-key="ip" data-filter-value="${escapeHtml(e.source_ip)}">Filtern</button>
+      <button type="button" data-action="unban" data-ip="${escapeHtml(e.source_ip)}">Ban löschen</button>
+    </div>`;
+  }).join("");
+}
+
+// Gemeinsam mit der "Aktive Blocks"-Tabelle, damit sowohl dort als auch aus
+// dem Fehlalarm-Banner heraus entsperrt werden kann, jeweils mit Bestaetigung
+// und anschliessendem Refresh beider Ansichten (Tabelle + Banner).
+async function unbanIp(ip, btn){
+  if(!confirm(`Ban für ${ip} jetzt löschen?`)) return;
+  btn.disabled = true;
+  try{
+    const res = await fetch(`/api/crowdsec/ban/${encodeURIComponent(ip)}`, { method: "DELETE" });
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.error || "Unbekannter Fehler");
+    loadCrowdsecCurrent();
+    loadStats();
+  }catch(e){
+    alert(`Ban löschen fehlgeschlagen: ${e.message}`);
+    btn.disabled = false;
+  }
+}
+
+document.getElementById("crowdsec-fp-warning").addEventListener("click", (ev) => {
+  const filterEl = ev.target.closest("[data-filter-key]");
+  if(filterEl){ handleFilterClick(filterEl, ev); return; }
+  const unbanBtn = ev.target.closest("[data-action='unban']");
+  if(unbanBtn) unbanIp(unbanBtn.dataset.ip, unbanBtn);
+});
+
 const REQUEST_SCALE_LOW = [0x1b, 0x25, 0x32];   // #1b2532, wenig Requests
 const REQUEST_SCALE_HIGH = [0xf2, 0xb8, 0x4b];  // #f2b84b (--accent-amber), viele Requests
 
@@ -1148,6 +1224,7 @@ async function loadStats(){
   document.getElementById("kpi-latency-avg").textContent = formatMs(data.latency.avg);
 
   renderAnomalies(data.anomalies);
+  renderCrowdsecFpWarning(data.crowdsec_likely_fp);
   updateWorldMap(data.countries);
 
   // Timeseries
@@ -1517,17 +1594,7 @@ document.getElementById("crowdsec-current-body").addEventListener("click", async
   const action = btn.dataset.action;
 
   if(action === "unban"){
-    if(!confirm(`Ban für ${ip} jetzt löschen?`)) return;
-    btn.disabled = true;
-    try{
-      const res = await fetch(`/api/crowdsec/ban/${encodeURIComponent(ip)}`, { method: "DELETE" });
-      const data = await res.json();
-      if(!res.ok) throw new Error(data.error || "Unbekannter Fehler");
-      loadCrowdsecCurrent();
-    }catch(e){
-      alert(`Ban löschen fehlgeschlagen: ${e.message}`);
-      btn.disabled = false;
-    }
+    await unbanIp(ip, btn);
   } else if(action === "whitelist"){
     if(!confirm(`${ip} whitelisten und aktiven Ban sofort löschen?\n\n(Die Whitelist wird erst wirksam, nachdem du sie im Whitelist-Widget mit "Anwenden" bestätigst.)`)) return;
     btn.disabled = true;
