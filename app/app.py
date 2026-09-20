@@ -66,9 +66,20 @@ ASN_REFRESH_INTERVAL_SECONDS = 7 * 24 * 3600  # woechentlich, wie CrowdSecs eige
 # durch dynamische Neuvergabe eine von CrowdSec vorher gebannte IP erben und
 # dadurch faelschlich als aktiv geblockt erscheinen, obwohl es sich um legitimen
 # Zugriff handelt. Erfordert ASN_ENRICHMENT_ENABLED (liefert as_name); ohne das
-# bleibt diese Warnung mangels Daten stumm.
-CROWDSEC_LIKELY_FP_COUNTRIES = ("DE", "CH")
-CROWDSEC_LIKELY_FP_ISP_KEYWORDS = ("bluewin", "sunrise", "telekom", "quickline", "salt", "swisscom")
+# bleibt diese Warnung mangels Daten stumm. Nur die Startwerte fuer einen frischen
+# Install - danach ueber /settings editierbar und in sync_state persistiert
+# (Schluessel "crowdsec_fp_criteria"), siehe get_crowdsec_fp_criteria().
+CROWDSEC_FP_DEFAULT_COUNTRIES = ["DE", "CH"]
+CROWDSEC_FP_DEFAULT_ISP_KEYWORDS = ["bluewin", "sunrise", "telekom", "quickline", "salt", "swisscom"]
+
+# Optionaler ntfy-Push fuer jeden NEU erkannten Fehlalarm-Treffer, auch wenn
+# gerade niemand das Dashboard offen hat - laeuft im Poller (siehe
+# check_crowdsec_fp_notifications()). CROWDSEC_FP_NOTIFY_URL ist die volle
+# ntfy-Topic-URL (z.B. https://ntfy.example.com/mytopic), CROWDSEC_FP_NOTIFY_TOKEN
+# ein ntfy-Zugriffstoken dafuer. Ohne beides bleibt die Benachrichtigung stumm,
+# die Warnung im Dashboard funktioniert trotzdem weiter.
+CROWDSEC_FP_NOTIFY_URL = os.environ.get("CROWDSEC_FP_NOTIFY_URL", "").rstrip("/")
+CROWDSEC_FP_NOTIFY_TOKEN = os.environ.get("CROWDSEC_FP_NOTIFY_TOKEN", "")
 
 if not NB_API_BASE or not NB_API_TOKEN:
     log.warning(
@@ -78,6 +89,8 @@ if not CROWDSEC_CONFIGURED:
     log.info("CROWDSEC_API_URL/MACHINE_ID/MACHINE_PASSWORD nicht gesetzt - CrowdSec-Integration deaktiviert.")
 if ASN_ENRICHMENT_ENABLED:
     log.info("ASN-Anreicherung aktiviert - laedt bei Bedarf %s", ASN_MMDB_URL)
+if CROWDSEC_FP_NOTIFY_URL and CROWDSEC_FP_NOTIFY_TOKEN:
+    log.info("CrowdSec-Fehlalarm-Benachrichtigung aktiviert -> %s", CROWDSEC_FP_NOTIFY_URL)
 
 app = Flask(__name__)
 
@@ -195,6 +208,11 @@ def init_db():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_crowdsec_created ON crowdsec_alerts(created_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_crowdsec_ip ON crowdsec_alerts(source_ip)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_crowdsec_expires ON crowdsec_alerts(expires_at)")
+    # Markiert, ob fuer diesen Alert schon eine Fehlalarm-Benachrichtigung raus ist
+    # (siehe check_crowdsec_fp_notifications) - eigenes ALTER statt in
+    # migrate_schema(), weil crowdsec_alerts erst hier oben angelegt wird.
+    if "fp_notified" not in {row["name"] for row in conn.execute("PRAGMA table_info(crowdsec_alerts)")}:
+        conn.execute("ALTER TABLE crowdsec_alerts ADD COLUMN fp_notified INTEGER NOT NULL DEFAULT 0")
     conn.commit()
     conn.close()
 
@@ -218,6 +236,33 @@ def set_sync_state(key, value):
         )
         conn.commit()
         conn.close()
+
+
+def get_crowdsec_fp_criteria():
+    """Vom Nutzer ueber /settings gepflegte Kriterien fuer die CrowdSec-
+    Fehlalarm-Warnung/-Benachrichtigung - in sync_state statt einer eigenen
+    Tabelle, weil es sich um einen einzelnen JSON-Wert handelt und sync_state
+    bereits ein generischer Key-Value-Speicher ist. Faellt auf die
+    CROWDSEC_FP_DEFAULT_*-Konstanten zurueck, solange nichts gespeichert (oder
+    das Gespeicherte kaputt) ist."""
+    raw = get_sync_state("crowdsec_fp_criteria")
+    defaults = {"countries": list(CROWDSEC_FP_DEFAULT_COUNTRIES), "isp_keywords": list(CROWDSEC_FP_DEFAULT_ISP_KEYWORDS)}
+    if not raw:
+        return defaults
+    try:
+        data = json.loads(raw)
+        return {
+            "countries": [str(c) for c in data.get("countries", [])],
+            "isp_keywords": [str(k) for k in data.get("isp_keywords", [])],
+        }
+    except (ValueError, AttributeError, TypeError):
+        log.warning("crowdsec_fp_criteria in sync_state ist kaputt - falle auf Standardwerte zurueck")
+        return defaults
+
+
+def set_crowdsec_fp_criteria(countries, isp_keywords):
+    value = json.dumps({"countries": countries, "isp_keywords": isp_keywords})
+    set_sync_state("crowdsec_fp_criteria", value)
 
 
 def log_security_event(e):
@@ -485,6 +530,97 @@ def crowdsec_delete_decision(decision_id):
     return resp.json()
 
 
+def find_active_crowdsec_fp_alerts(conn, criteria, only_unnotified=False):
+    """Aktuell aktive crowdsec_alerts-Zeilen, die auf criteria (Laender + ISP-
+    Namensstichworte, siehe get_crowdsec_fp_criteria()) passen - gemeinsame
+    Query fuer den Dashboard-Banner (_compute_stats) und die ntfy-
+    Benachrichtigung (check_crowdsec_fp_notifications). Zeilenweise (nicht nach
+    IP gruppiert), weil Letztere pro alert_id unterscheiden muss, was schon
+    benachrichtigt wurde."""
+    countries, isp_keywords = criteria["countries"], criteria["isp_keywords"]
+    if not countries or not isp_keywords:
+        return []
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    country_sql = " OR ".join("country_code = ?" for _ in countries)
+    isp_sql = " OR ".join("as_name LIKE ?" for _ in isp_keywords)
+    notified_sql = " AND fp_notified = 0" if only_unnotified else ""
+    return conn.execute(
+        f"""
+        SELECT alert_id, source_ip, country_code, as_number, as_name, scenario, expires_at
+        FROM crowdsec_alerts
+        WHERE expires_at IS NOT NULL AND expires_at > ?
+          AND ({country_sql})
+          AND ({isp_sql})
+          {notified_sql}
+        ORDER BY expires_at DESC
+        """,
+        [now_iso, *countries, *[f"%{kw}%" for kw in isp_keywords]],
+    ).fetchall()
+
+
+def send_crowdsec_fp_notification(source_ip, country_code, as_name, scenarios):
+    """Pusht per ntfy eine Benachrichtigung fuer einen neu erkannten,
+    vermutlichen CrowdSec-Fehlalarm - unabhaengig vom Dashboard, siehe
+    check_crowdsec_fp_notifications(). Gibt True bei Erfolg zurueck, damit der
+    Aufrufer den jeweiligen alert_id erst dann als benachrichtigt markiert -
+    sonst bliebe ein ntfy-Ausfall stillschweigend fuer immer unbenachrichtigt."""
+    message = (
+        f"{source_ip} ({country_code or '??'}, {as_name or 'unbekannter ISP'}) ist "
+        f"aktuell durch CrowdSec blockiert.\n"
+        f"Szenarien: {', '.join(scenarios) if scenarios else 'unbekannt'}\n\n"
+        f"Kriterien passen auf einen bekannten Consumer-ISP - moeglicherweise ein Fehlalarm."
+    )
+    try:
+        resp = requests.post(
+            CROWDSEC_FP_NOTIFY_URL,
+            data=message.encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {CROWDSEC_FP_NOTIFY_TOKEN}",
+                "Title": f"Moeglicher CrowdSec-Fehlalarm: {source_ip}",
+                "Priority": "high",
+                "Tags": "warning",
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return True
+    except Exception:
+        log.exception("CrowdSec-FP-Benachrichtigung fuer %s konnte nicht gesendet werden", source_ip)
+        return False
+
+
+def check_crowdsec_fp_notifications():
+    """Prueft aktuell aktive, noch nicht benachrichtigte CrowdSec-Bans gegen
+    die gespeicherten Fehlalarm-Kriterien und pusht bei Treffern eine ntfy-
+    Benachrichtigung - laeuft im Poller (poller_loop), damit das auch ankommt,
+    wenn niemand das Dashboard offen hat. fp_notified auf dem jeweiligen
+    alert_id verhindert Wiederholungen; sync_crowdsec()'s ON CONFLICT-Update
+    laesst die Spalte bewusst unangetastet, damit ein verlaengerter Ban nicht
+    erneut benachrichtigt."""
+    if not (CROWDSEC_CONFIGURED and CROWDSEC_FP_NOTIFY_URL and CROWDSEC_FP_NOTIFY_TOKEN):
+        return
+    conn = get_conn()
+    rows = find_active_crowdsec_fp_alerts(conn, get_crowdsec_fp_criteria(), only_unnotified=True)
+    if not rows:
+        conn.close()
+        return
+
+    by_ip = defaultdict(list)
+    for r in rows:
+        by_ip[r["source_ip"]].append(r)
+
+    for source_ip, alerts in by_ip.items():
+        scenarios = sorted({a["scenario"] for a in alerts if a["scenario"]})
+        if send_crowdsec_fp_notification(source_ip, alerts[0]["country_code"], alerts[0]["as_name"], scenarios):
+            with _db_lock:
+                conn.executemany(
+                    "UPDATE crowdsec_alerts SET fp_notified = 1 WHERE alert_id = ?",
+                    [(a["alert_id"],) for a in alerts],
+                )
+                conn.commit()
+    conn.close()
+
+
 def read_whitelist_file():
     with open(WHITELIST_FILE_PATH, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
@@ -585,6 +721,10 @@ def poller_loop():
             sync_crowdsec()
         except Exception:
             log.exception("Unerwarteter Fehler beim CrowdSec-Sync")
+        try:
+            check_crowdsec_fp_notifications()
+        except Exception:
+            log.exception("Unerwarteter Fehler bei der CrowdSec-Fehlalarm-Benachrichtigung")
         try:
             prune_old_events()
         except Exception:
@@ -1012,6 +1152,11 @@ def index():
     return render_template("dashboard.html")
 
 
+@app.route("/settings")
+def settings_page():
+    return render_template("settings.html")
+
+
 @app.route("/healthz")
 def healthz():
     return jsonify(status="ok")
@@ -1259,37 +1404,27 @@ def _compute_stats(args):
         anomalies.append({"type": "crowdsec_unavailable", "count": crowdsec_unavailable_count})
 
     # Aktuell aktive Bans mit vermutlichem Fehlalarm-Muster (Land + ISP), siehe
-    # CROWDSEC_LIKELY_FP_*. Bewusst unabhaengig von der gewaehlten Zeitraum-/
-    # Cross-Filter-Auswahl der Seite - das ist eine globale "gerade jetzt
-    # blockiert"-Warnung, kein Report ueber das aktuelle Datenfenster. Eigenes
-    # Feld statt in anomalies, weil es im Frontend als staendig sichtbarer
-    # Banner statt im einklappbaren Anomalien-Dropdown erscheinen soll.
+    # get_crowdsec_fp_criteria()/find_active_crowdsec_fp_alerts(). Bewusst
+    # unabhaengig von der gewaehlten Zeitraum-/Cross-Filter-Auswahl der Seite -
+    # das ist eine globale "gerade jetzt blockiert"-Warnung, kein Report ueber
+    # das aktuelle Datenfenster. Eigenes Feld statt in anomalies, weil es im
+    # Frontend als staendig sichtbarer Banner statt im einklappbaren
+    # Anomalien-Dropdown erscheinen soll.
     crowdsec_likely_fp = []
     if CROWDSEC_CONFIGURED:
-        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        country_sql = " OR ".join("country_code = ?" for _ in CROWDSEC_LIKELY_FP_COUNTRIES)
-        isp_sql = " OR ".join("as_name LIKE ?" for _ in CROWDSEC_LIKELY_FP_ISP_KEYWORDS)
-        fp_rows = conn.execute(
-            f"""
-            SELECT source_ip, country_code, as_number, as_name,
-                   MAX(expires_at) expires_at, GROUP_CONCAT(DISTINCT scenario) scenarios
-            FROM crowdsec_alerts
-            WHERE expires_at IS NOT NULL AND expires_at > ?
-              AND ({country_sql})
-              AND ({isp_sql})
-            GROUP BY source_ip
-            ORDER BY expires_at DESC
-            """,
-            [now_iso, *CROWDSEC_LIKELY_FP_COUNTRIES, *[f"%{kw}%" for kw in CROWDSEC_LIKELY_FP_ISP_KEYWORDS]],
-        ).fetchall()
-        for r in fp_rows:
-            crowdsec_likely_fp.append({
+        by_ip = {}
+        for r in find_active_crowdsec_fp_alerts(conn, get_crowdsec_fp_criteria()):
+            entry = by_ip.setdefault(r["source_ip"], {
                 "source_ip": r["source_ip"],
                 "country_code": r["country_code"],
                 "as_name": r["as_name"],
-                "scenarios": (r["scenarios"] or "").split(","),
+                "scenarios": [],
                 "expires_at": r["expires_at"],
             })
+            if r["scenario"] and r["scenario"] not in entry["scenarios"]:
+                entry["scenarios"].append(r["scenario"])
+            entry["expires_at"] = max(entry["expires_at"], r["expires_at"])
+        crowdsec_likely_fp = sorted(by_ip.values(), key=lambda e: e["expires_at"], reverse=True)
 
     conn.close()
 
@@ -1513,6 +1648,45 @@ def api_crowdsec_delete_ban(ip):
     if errors and not deleted:
         return jsonify(error="; ".join(errors)), 502
     return jsonify(ok=True, deleted_decision_ids=deleted, errors=errors)
+
+
+@app.route("/api/crowdsec/fp-criteria", methods=["GET"])
+def api_crowdsec_fp_criteria_get():
+    return jsonify(get_crowdsec_fp_criteria())
+
+
+@app.route("/api/crowdsec/fp-criteria", methods=["POST"])
+def api_crowdsec_fp_criteria_set():
+    """Speichert die vom Nutzer auf /settings gepflegten Fehlalarm-Kriterien.
+    Validiert hier statt in set_crowdsec_fp_criteria(), damit Letztere den
+    aufrufenden /settings-Code nicht mit einer zweiten Fehlerquelle belastet."""
+    data = request.get_json(silent=True) or {}
+    countries_raw = data.get("countries")
+    isp_raw = data.get("isp_keywords")
+    if not isinstance(countries_raw, list) or not isinstance(isp_raw, list):
+        return jsonify(error="countries und isp_keywords muessen Listen sein"), 400
+
+    countries = []
+    for c in countries_raw:
+        c = str(c).strip().upper()
+        if not c:
+            continue
+        if not re.fullmatch(r"[A-Z]{2}", c):
+            return jsonify(error=f"Ungueltiger Laendercode: {c!r} (erwartet 2 Buchstaben, z.B. CH)"), 400
+        if c not in countries:
+            countries.append(c)
+
+    isp_keywords = []
+    for k in isp_raw:
+        k = str(k).strip().lower()
+        if k and k not in isp_keywords:
+            isp_keywords.append(k)
+
+    if not countries or not isp_keywords:
+        return jsonify(error="Mindestens ein Land und ein ISP-Stichwort sind erforderlich"), 400
+
+    set_crowdsec_fp_criteria(countries, isp_keywords)
+    return jsonify(countries=countries, isp_keywords=isp_keywords)
 
 
 @app.route("/api/crowdsec/whitelist")

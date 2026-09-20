@@ -51,6 +51,11 @@
   .brand .dot{ width:9px; height:9px; border-radius:50%; background: var(--accent-ok); box-shadow: 0 0 8px var(--accent-ok); }
   .brand h1{ font-size:15px; margin:0; letter-spacing:.02em; font-weight:600; }
   .brand span.sub{ color: var(--muted); font-family: var(--mono); font-size:12px; }
+  .settings-link{
+    color: var(--muted); font-family: var(--mono); font-size:12px; text-decoration:none;
+    border:1px solid var(--border); border-radius:6px; padding:4px 10px; white-space:nowrap;
+  }
+  .settings-link:hover{ color: var(--accent-info); border-color: var(--accent-info); }
 
   main{ padding: 20px; max-width: 1320px; margin: 0 auto; }
 
@@ -302,6 +307,7 @@
   </div>
   <span id="poller-status" title="Poller-Status"><span class="dot"></span><span id="poller-status-text">–</span></span>
   <span id="last-update">lade&hellip;</span>
+  <a href="/settings" class="settings-link" title="Einstellungen: Fehlalarm-Kriterien">⚙ Einstellungen</a>
 </header>
 
 <div class="filter-bar" id="filter-bar">
