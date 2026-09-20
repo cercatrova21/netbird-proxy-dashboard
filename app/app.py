@@ -68,7 +68,7 @@ ASN_REFRESH_INTERVAL_SECONDS = 7 * 24 * 3600  # woechentlich, wie CrowdSecs eige
 # Zugriff handelt. Erfordert ASN_ENRICHMENT_ENABLED (liefert as_name); ohne das
 # bleibt diese Warnung mangels Daten stumm.
 CROWDSEC_LIKELY_FP_COUNTRIES = ("DE", "CH")
-CROWDSEC_LIKELY_FP_ISP_KEYWORDS = ("bluewin", "sunrise", "telekom", "quickline", "salt")
+CROWDSEC_LIKELY_FP_ISP_KEYWORDS = ("bluewin", "sunrise", "telekom", "quickline", "salt", "swisscom")
 
 if not NB_API_BASE or not NB_API_TOKEN:
     log.warning(
