@@ -61,6 +61,33 @@
   textarea{ resize: vertical; }
   textarea:focus, input:focus{ outline:none; border-color: var(--accent-info); }
 
+  .country-picker{ position:relative; }
+  .country-chips{ display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px; }
+  .country-chips:empty{ margin-bottom:0; }
+  .country-chip{
+    display:inline-flex; align-items:center; gap:6px;
+    background: rgba(91,157,255,.12); border:1px solid var(--accent-info); color: var(--accent-info);
+    border-radius:999px; padding:4px 6px 4px 10px; font-family: var(--sans); font-size:12.5px;
+  }
+  .country-chip button{
+    background:none; border:none; color: inherit; cursor:pointer; font-size:14px; line-height:1;
+    padding:2px 4px; border-radius:50%; opacity:.75;
+  }
+  .country-chip button:hover{ opacity:1; background: rgba(91,157,255,.2); }
+  .country-dropdown{
+    display:none; position:absolute; z-index:10; top: calc(100% + 4px); left:0; right:0;
+    max-height:260px; overflow-y:auto; background: var(--panel-2); border:1px solid var(--border);
+    border-radius:8px; box-shadow: 0 8px 24px rgba(0,0,0,.35);
+  }
+  .country-dropdown.open{ display:block; }
+  .country-option{
+    display:flex; align-items:center; gap:10px; padding:8px 12px; cursor:pointer; font-size:13px;
+  }
+  .country-option:hover, .country-option.active{ background: rgba(91,157,255,.12); }
+  .country-option .flag{ font-size:16px; }
+  .country-option .code{ color: var(--muted); font-family: var(--mono); font-size:11px; margin-left:auto; }
+  .country-dropdown .no-results{ padding:10px 12px; color: var(--muted); font-size:12.5px; }
+
   .btn{
     background: rgba(91,157,255,.12); border:1px solid var(--accent-info); color: var(--accent-info);
     border-radius:8px; padding:8px 18px; font-family: var(--mono); font-size:13px; cursor:pointer;
@@ -97,9 +124,13 @@
     </p>
 
     <div class="field">
-      <label for="f-countries">Länder</label>
-      <input type="text" id="f-countries" placeholder="z. B. CH, DE">
-      <div class="field-hint">2-Buchstaben-Ländercodes (ISO 3166-1 alpha-2), kommagetrennt. Alle angegebenen Länder werden ODER-verknüpft geprüft.</div>
+      <label for="f-country-search">Länder</label>
+      <div class="country-picker">
+        <div class="country-chips" id="country-chips"></div>
+        <input type="text" id="f-country-search" placeholder="Land suchen und auswählen…" autocomplete="off">
+        <div class="country-dropdown" id="country-dropdown"></div>
+      </div>
+      <div class="field-hint">Alle ausgewählten Länder werden ODER-verknüpft geprüft. Gespeichert wird intern jeweils der 2-Buchstaben-Ländercode (ISO 3166-1 alpha-2).</div>
     </div>
 
     <div class="field">
@@ -118,11 +149,136 @@
 </main>
 
 <script>
+// ISO 3166-1 alpha-2 -> deutscher Landesname, nur fuer diese Seite (die einzige,
+// die volle Laendernamen statt nur Codes braucht) - kein Grund, das in
+// dashboard.html mitzuschleppen.
+const COUNTRY_NAMES = {
+  AD:"Andorra", AE:"Vereinigte Arabische Emirate", AF:"Afghanistan", AG:"Antigua und Barbuda",
+  AI:"Anguilla", AL:"Albanien", AM:"Armenien", AO:"Angola", AQ:"Antarktis", AR:"Argentinien",
+  AS:"Amerikanisch-Samoa", AT:"Österreich", AU:"Australien", AW:"Aruba", AX:"Åland", AZ:"Aserbaidschan",
+  BA:"Bosnien und Herzegowina", BB:"Barbados", BD:"Bangladesch", BE:"Belgien", BF:"Burkina Faso",
+  BG:"Bulgarien", BH:"Bahrain", BI:"Burundi", BJ:"Benin", BL:"Saint-Barthélemy", BM:"Bermuda",
+  BN:"Brunei", BO:"Bolivien", BQ:"Bonaire, Sint Eustatius und Saba", BR:"Brasilien", BS:"Bahamas",
+  BT:"Bhutan", BV:"Bouvetinsel", BW:"Botsuana", BY:"Belarus", BZ:"Belize", CA:"Kanada",
+  CC:"Kokosinseln", CD:"Kongo (Dem. Republik)", CF:"Zentralafrikanische Republik", CG:"Kongo (Republik)",
+  CH:"Schweiz", CI:"Elfenbeinküste", CK:"Cookinseln", CL:"Chile", CM:"Kamerun", CN:"China",
+  CO:"Kolumbien", CR:"Costa Rica", CU:"Kuba", CV:"Kap Verde", CW:"Curaçao", CX:"Weihnachtsinsel",
+  CY:"Zypern", CZ:"Tschechien", DE:"Deutschland", DJ:"Dschibuti", DK:"Dänemark", DM:"Dominica",
+  DO:"Dominikanische Republik", DZ:"Algerien", EC:"Ecuador", EE:"Estland", EG:"Ägypten",
+  EH:"Westsahara", ER:"Eritrea", ES:"Spanien", ET:"Äthiopien", FI:"Finnland", FJ:"Fidschi",
+  FK:"Falklandinseln", FM:"Mikronesien", FO:"Färöer", FR:"Frankreich", GA:"Gabun",
+  GB:"Vereinigtes Königreich", GD:"Grenada", GE:"Georgien", GF:"Französisch-Guayana", GG:"Guernsey",
+  GH:"Ghana", GI:"Gibraltar", GL:"Grönland", GM:"Gambia", GN:"Guinea", GP:"Guadeloupe",
+  GQ:"Äquatorialguinea", GR:"Griechenland", GS:"Südgeorgien und die Südlichen Sandwichinseln",
+  GT:"Guatemala", GU:"Guam", GW:"Guinea-Bissau", GY:"Guyana", HK:"Hongkong",
+  HM:"Heard- und McDonaldinseln", HN:"Honduras", HR:"Kroatien", HT:"Haiti", HU:"Ungarn",
+  ID:"Indonesien", IE:"Irland", IL:"Israel", IM:"Isle of Man", IN:"Indien",
+  IO:"Britisches Territorium im Indischen Ozean", IQ:"Irak", IR:"Iran", IS:"Island", IT:"Italien",
+  JE:"Jersey", JM:"Jamaika", JO:"Jordanien", JP:"Japan", KE:"Kenia", KG:"Kirgisistan",
+  KH:"Kambodscha", KI:"Kiribati", KM:"Komoren", KN:"St. Kitts und Nevis", KP:"Nordkorea",
+  KR:"Südkorea", KW:"Kuwait", KY:"Kaimaninseln", KZ:"Kasachstan", LA:"Laos", LB:"Libanon",
+  LC:"St. Lucia", LI:"Liechtenstein", LK:"Sri Lanka", LR:"Liberia", LS:"Lesotho", LT:"Litauen",
+  LU:"Luxemburg", LV:"Lettland", LY:"Libyen", MA:"Marokko", MC:"Monaco", MD:"Moldau",
+  ME:"Montenegro", MF:"Saint-Martin", MG:"Madagaskar", MH:"Marshallinseln", MK:"Nordmazedonien",
+  ML:"Mali", MM:"Myanmar", MN:"Mongolei", MO:"Macau", MP:"Nördliche Marianen", MQ:"Martinique",
+  MR:"Mauretanien", MS:"Montserrat", MT:"Malta", MU:"Mauritius", MV:"Malediven", MW:"Malawi",
+  MX:"Mexiko", MY:"Malaysia", MZ:"Mosambik", NA:"Namibia", NC:"Neukaledonien", NE:"Niger",
+  NF:"Norfolkinsel", NG:"Nigeria", NI:"Nicaragua", NL:"Niederlande", NO:"Norwegen", NP:"Nepal",
+  NR:"Nauru", NU:"Niue", NZ:"Neuseeland", OM:"Oman", PA:"Panama", PE:"Peru",
+  PF:"Französisch-Polynesien", PG:"Papua-Neuguinea", PH:"Philippinen", PK:"Pakistan", PL:"Polen",
+  PM:"Saint-Pierre und Miquelon", PN:"Pitcairninseln", PR:"Puerto Rico", PS:"Palästina",
+  PT:"Portugal", PW:"Palau", PY:"Paraguay", QA:"Katar", RE:"Réunion", RO:"Rumänien", RS:"Serbien",
+  RU:"Russland", RW:"Ruanda", SA:"Saudi-Arabien", SB:"Salomonen", SC:"Seychellen", SD:"Sudan",
+  SE:"Schweden", SG:"Singapur", SH:"St. Helena", SI:"Slowenien", SJ:"Svalbard und Jan Mayen",
+  SK:"Slowakei", SL:"Sierra Leone", SM:"San Marino", SN:"Senegal", SO:"Somalia", SR:"Suriname",
+  SS:"Südsudan", ST:"São Tomé und Príncipe", SV:"El Salvador", SX:"Sint Maarten", SY:"Syrien",
+  SZ:"Eswatini", TC:"Turks- und Caicosinseln", TD:"Tschad",
+  TF:"Französische Süd- und Antarktisgebiete", TG:"Togo", TH:"Thailand", TJ:"Tadschikistan",
+  TK:"Tokelau", TL:"Osttimor", TM:"Turkmenistan", TN:"Tunesien", TO:"Tonga", TR:"Türkei",
+  TT:"Trinidad und Tobago", TV:"Tuvalu", TW:"Taiwan", TZ:"Tansania", UA:"Ukraine", UG:"Uganda",
+  UM:"Amerikanische Überseeinseln (Kleinere)", US:"Vereinigte Staaten", UY:"Uruguay",
+  UZ:"Usbekistan", VA:"Vatikanstadt", VC:"St. Vincent und die Grenadinen", VE:"Venezuela",
+  VG:"Britische Jungferninseln", VI:"Amerikanische Jungferninseln", VN:"Vietnam", VU:"Vanuatu",
+  WF:"Wallis und Futuna", WS:"Samoa", YE:"Jemen", YT:"Mayotte", ZA:"Südafrika", ZM:"Sambia",
+  ZW:"Simbabwe",
+};
+
+function flagEmoji(code){
+  if(!code || code.length !== 2) return "🏳️";
+  const A = 0x1F1E6;
+  return String.fromCodePoint(A + (code.toUpperCase().charCodeAt(0)-65), A + (code.toUpperCase().charCodeAt(1)-65));
+}
+
+function countryName(code){
+  return COUNTRY_NAMES[code] || code;
+}
+
+let selectedCountries = [];
+
+function renderCountryChips(){
+  const el = document.getElementById("country-chips");
+  el.innerHTML = selectedCountries
+    .slice()
+    .sort((a, b) => countryName(a).localeCompare(countryName(b), "de"))
+    .map(code => `<span class="country-chip" data-code="${code}">${flagEmoji(code)} ${countryName(code)}<button type="button" data-remove="${code}" aria-label="${code} entfernen">✕</button></span>`)
+    .join("");
+}
+
+function renderCountryDropdown(query){
+  const dropdown = document.getElementById("country-dropdown");
+  const q = query.trim().toLowerCase();
+  const matches = Object.keys(COUNTRY_NAMES)
+    .filter(code => !selectedCountries.includes(code))
+    .filter(code => !q || countryName(code).toLowerCase().includes(q) || code.toLowerCase().includes(q))
+    .sort((a, b) => countryName(a).localeCompare(countryName(b), "de"))
+    .slice(0, 30);
+
+  dropdown.innerHTML = matches.length
+    ? matches.map(code => `<div class="country-option" data-code="${code}"><span class="flag">${flagEmoji(code)}</span><span>${countryName(code)}</span><span class="code">${code}</span></div>`).join("")
+    : `<div class="no-results">Keine Treffer</div>`;
+  dropdown.classList.add("open");
+}
+
+function closeCountryDropdown(){
+  document.getElementById("country-dropdown").classList.remove("open");
+}
+
+function addCountry(code){
+  if(!selectedCountries.includes(code)) selectedCountries.push(code);
+  renderCountryChips();
+  const search = document.getElementById("f-country-search");
+  search.value = "";
+  renderCountryDropdown("");
+  search.focus();
+}
+
+function removeCountry(code){
+  selectedCountries = selectedCountries.filter(c => c !== code);
+  renderCountryChips();
+}
+
+const countrySearch = document.getElementById("f-country-search");
+countrySearch.addEventListener("focus", () => renderCountryDropdown(countrySearch.value));
+countrySearch.addEventListener("input", () => renderCountryDropdown(countrySearch.value));
+document.getElementById("country-dropdown").addEventListener("mousedown", (ev) => {
+  // mousedown statt click, damit es VOR dem blur des Suchfelds feuert
+  const opt = ev.target.closest("[data-code]");
+  if(opt) addCountry(opt.dataset.code);
+});
+document.getElementById("country-chips").addEventListener("click", (ev) => {
+  const btn = ev.target.closest("[data-remove]");
+  if(btn) removeCountry(btn.dataset.remove);
+});
+document.addEventListener("click", (ev) => {
+  if(!ev.target.closest(".country-picker")) closeCountryDropdown();
+});
+
 async function loadCriteria(){
   try{
     const res = await fetch("/api/crowdsec/fp-criteria");
     const data = await res.json();
-    document.getElementById("f-countries").value = (data.countries || []).join(", ");
+    selectedCountries = (data.countries || []).slice();
+    renderCountryChips();
     document.getElementById("f-isp").value = (data.isp_keywords || []).join(", ");
   }catch(e){
     const status = document.getElementById("save-status");
@@ -138,7 +294,6 @@ function splitList(value){
 document.getElementById("save-btn").addEventListener("click", async () => {
   const btn = document.getElementById("save-btn");
   const status = document.getElementById("save-status");
-  const countries = splitList(document.getElementById("f-countries").value);
   const isp_keywords = splitList(document.getElementById("f-isp").value);
 
   btn.disabled = true;
@@ -148,11 +303,12 @@ document.getElementById("save-btn").addEventListener("click", async () => {
     const res = await fetch("/api/crowdsec/fp-criteria", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ countries, isp_keywords }),
+      body: JSON.stringify({ countries: selectedCountries, isp_keywords }),
     });
     const data = await res.json();
     if(!res.ok) throw new Error(data.error || "Unbekannter Fehler");
-    document.getElementById("f-countries").value = data.countries.join(", ");
+    selectedCountries = data.countries.slice();
+    renderCountryChips();
     document.getElementById("f-isp").value = data.isp_keywords.join(", ");
     status.textContent = "Gespeichert.";
     status.className = "ok";
