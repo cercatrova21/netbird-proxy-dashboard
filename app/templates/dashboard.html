@@ -172,6 +172,66 @@
   .action-btn:disabled{ opacity:.5; cursor:default; }
   .table-wrap{ max-height: 480px; overflow:auto; }
   .flag{ margin-right:6px; }
+
+  /* Whitelist-Widget: Zeilen nach Typ eingefaerbt (blau = einzelne IP, praezise;
+     amber = CIDR-Range, breiter greifend), damit man den Umfang eines Eintrags
+     auf einen Blick erkennt statt die Typ-Spalte lesen zu muessen. */
+  #crowdsec-whitelist-body tr.wl-row-ip td:first-child{ border-left: 3px solid var(--accent-info); }
+  #crowdsec-whitelist-body tr.wl-row-cidr td:first-child{ border-left: 3px solid var(--accent-amber); }
+  .badge.info{ background: rgba(91,157,255,.12); color: var(--accent-info); }
+
+  /* Gleiches Ellipsis-statt-Umbruch-Muster wie .path-cell (siehe dort), fuer
+     lange Freitext-Notizen an einem Whitelist-Eintrag. */
+  .note-cell{
+    display:inline-block; max-width:260px; overflow:hidden; text-overflow:ellipsis;
+    white-space:nowrap; vertical-align:bottom;
+  }
+  .note-cell.empty{ color: var(--muted); }
+
+  .wl-form{
+    background: var(--panel-2); border:1px solid var(--accent-info); border-radius:8px;
+    padding:14px; margin-bottom:12px;
+  }
+  .wl-form-grid{ display:grid; grid-template-columns: 1.3fr 1.3fr 2fr; gap:10px; margin-bottom:10px; }
+  @media (max-width: 900px){ .wl-form-grid{ grid-template-columns: 1fr; } }
+  .wl-field label{
+    display:block; font-family: var(--mono); font-size:11px; color: var(--muted);
+    margin-bottom:5px; text-transform:uppercase; letter-spacing:.05em;
+  }
+  .wl-field input[type=text]{
+    width:100%; background: var(--panel); border:1px solid var(--border); color: var(--text);
+    border-radius:6px; padding:7px 10px; font-family: var(--mono); font-size:12.5px; box-sizing:border-box;
+  }
+  .wl-field input[type=text]:focus{ outline:none; border-color: var(--accent-info); }
+  .wl-form-actions{ display:flex; align-items:center; gap:10px; }
+  .wl-form-error{ color: var(--accent-deny); font-family: var(--mono); font-size:12px; }
+
+  /* Einfach-Auswahl-Variante des Laender-Pickers aus settings.html (dort als
+     Mehrfachauswahl mit Chips) - hier reicht ein Land pro Whitelist-Eintrag. */
+  .wl-country-picker{ position:relative; }
+  .wl-country-selected{
+    display:none; align-items:center; gap:6px; margin-bottom:6px;
+    background: rgba(91,157,255,.12); border:1px solid var(--accent-info); color: var(--accent-info);
+    border-radius:999px; padding:4px 6px 4px 10px; font-family: var(--sans); font-size:12.5px; width:fit-content;
+  }
+  .wl-country-selected.show{ display:inline-flex; }
+  .wl-country-selected button{
+    background:none; border:none; color: inherit; cursor:pointer; font-size:13px; line-height:1;
+    padding:2px 4px; border-radius:50%; opacity:.75;
+  }
+  .wl-country-selected button:hover{ opacity:1; background: rgba(91,157,255,.2); }
+  .wl-country-dropdown{
+    display:none; position:absolute; z-index:10; top: calc(100% + 4px); left:0; right:0;
+    max-height:220px; overflow-y:auto; background: var(--panel); border:1px solid var(--border);
+    border-radius:8px; box-shadow: 0 8px 24px rgba(0,0,0,.35);
+  }
+  .wl-country-dropdown.open{ display:block; }
+  .wl-country-option{
+    display:flex; align-items:center; gap:10px; padding:7px 12px; cursor:pointer; font-size:12.5px;
+  }
+  .wl-country-option:hover{ background: rgba(91,157,255,.12); }
+  .wl-country-option .code{ color: var(--muted); font-family: var(--mono); font-size:11px; margin-left:auto; }
+  .wl-country-dropdown .no-results{ padding:9px 12px; color: var(--muted); font-size:12px; }
   footer{
     text-align:center; color: var(--muted); font-family: var(--mono); font-size:11px;
     padding: 24px 24px calc(24px + env(safe-area-inset-bottom)) 24px;
@@ -445,16 +505,48 @@
     </h2>
     <div class="collapsible-content" id="cs-whitelist-content">
       <div class="filters" style="align-items:center;">
-        <input id="cs-whitelist-input" placeholder="IP oder CIDR, z. B. 1.2.3.4 oder 10.0.0.0/8" style="min-width:260px;">
-        <button type="button" class="btn primary" id="cs-whitelist-add-btn">Hinzufügen</button>
+        <button type="button" class="btn primary" id="cs-whitelist-add-btn">+ Eintrag hinzufügen</button>
         <span id="cs-whitelist-dirty-note" style="display:none; color: var(--accent-amber); font-family: var(--mono); font-size:12px;">
           ● Änderungen noch nicht angewendet
         </span>
         <button type="button" class="btn" id="cs-whitelist-apply-btn" style="display:none;">Anwenden (Neustart netbird-logparser)</button>
       </div>
-      <div class="table-wrap" style="max-height:280px;">
+
+      <div class="wl-form" id="cs-whitelist-form" style="display:none;">
+        <div class="wl-form-grid">
+          <div class="wl-field">
+            <label for="wl-f-value">IP oder CIDR</label>
+            <input type="text" id="wl-f-value" placeholder="z. B. 1.2.3.4 oder 10.0.0.0/8" autocomplete="off">
+          </div>
+          <div class="wl-field">
+            <label for="wl-f-country-search">Herkunftsland</label>
+            <div class="wl-country-picker" id="wl-country-picker">
+              <span class="wl-country-selected" id="wl-country-selected"></span>
+              <input type="text" id="wl-f-country-search" placeholder="Land suchen…" autocomplete="off">
+              <div class="wl-country-dropdown" id="wl-country-dropdown"></div>
+            </div>
+          </div>
+          <div class="wl-field">
+            <label for="wl-f-note">Notiz</label>
+            <input type="text" id="wl-f-note" placeholder="z. B. Büro-Standort, VPN-Provider, bekannter Nutzer …">
+          </div>
+        </div>
+        <div class="wl-form-actions">
+          <button type="button" class="btn primary" id="wl-f-save">Hinzufügen</button>
+          <button type="button" class="btn" id="wl-f-cancel">Abbrechen</button>
+          <span class="wl-form-error" id="wl-f-error"></span>
+        </div>
+      </div>
+
+      <div class="table-wrap" style="max-height:340px;">
         <table>
-          <thead><tr><th style="width:90px;">Typ</th><th>Wert</th><th style="width:100px;">Aktion</th></tr></thead>
+          <thead><tr>
+            <th style="width:110px;">Land</th>
+            <th style="width:70px;">Typ</th>
+            <th>Wert</th>
+            <th>Notiz</th>
+            <th style="width:150px;">Aktion</th>
+          </tr></thead>
           <tbody id="crowdsec-whitelist-body"></tbody>
         </table>
       </div>
@@ -687,6 +779,64 @@ function flagEmoji(code){
   if(!code || code.length !== 2) return "🏳️";
   const A = 0x1F1E6;
   return String.fromCodePoint(A + (code.toUpperCase().charCodeAt(0)-65), A + (code.toUpperCase().charCodeAt(1)-65));
+}
+
+// ISO 3166-1 alpha-2 -> deutscher Landesname, fuer den Whitelist-Laender-Picker
+// unten (der volle Namen statt nur Codes zum Suchen/Anzeigen braucht) - identisch
+// zur Liste in settings.html, dort fuer den Fehlalarm-Kriterien-Picker.
+const COUNTRY_NAMES = {
+  AD:"Andorra", AE:"Vereinigte Arabische Emirate", AF:"Afghanistan", AG:"Antigua und Barbuda",
+  AI:"Anguilla", AL:"Albanien", AM:"Armenien", AO:"Angola", AQ:"Antarktis", AR:"Argentinien",
+  AS:"Amerikanisch-Samoa", AT:"Österreich", AU:"Australien", AW:"Aruba", AX:"Åland", AZ:"Aserbaidschan",
+  BA:"Bosnien und Herzegowina", BB:"Barbados", BD:"Bangladesch", BE:"Belgien", BF:"Burkina Faso",
+  BG:"Bulgarien", BH:"Bahrain", BI:"Burundi", BJ:"Benin", BL:"Saint-Barthélemy", BM:"Bermuda",
+  BN:"Brunei", BO:"Bolivien", BQ:"Bonaire, Sint Eustatius und Saba", BR:"Brasilien", BS:"Bahamas",
+  BT:"Bhutan", BV:"Bouvetinsel", BW:"Botsuana", BY:"Belarus", BZ:"Belize", CA:"Kanada",
+  CC:"Kokosinseln", CD:"Kongo (Dem. Republik)", CF:"Zentralafrikanische Republik", CG:"Kongo (Republik)",
+  CH:"Schweiz", CI:"Elfenbeinküste", CK:"Cookinseln", CL:"Chile", CM:"Kamerun", CN:"China",
+  CO:"Kolumbien", CR:"Costa Rica", CU:"Kuba", CV:"Kap Verde", CW:"Curaçao", CX:"Weihnachtsinsel",
+  CY:"Zypern", CZ:"Tschechien", DE:"Deutschland", DJ:"Dschibuti", DK:"Dänemark", DM:"Dominica",
+  DO:"Dominikanische Republik", DZ:"Algerien", EC:"Ecuador", EE:"Estland", EG:"Ägypten",
+  EH:"Westsahara", ER:"Eritrea", ES:"Spanien", ET:"Äthiopien", FI:"Finnland", FJ:"Fidschi",
+  FK:"Falklandinseln", FM:"Mikronesien", FO:"Färöer", FR:"Frankreich", GA:"Gabun",
+  GB:"Vereinigtes Königreich", GD:"Grenada", GE:"Georgien", GF:"Französisch-Guayana", GG:"Guernsey",
+  GH:"Ghana", GI:"Gibraltar", GL:"Grönland", GM:"Gambia", GN:"Guinea", GP:"Guadeloupe",
+  GQ:"Äquatorialguinea", GR:"Griechenland", GS:"Südgeorgien und die Südlichen Sandwichinseln",
+  GT:"Guatemala", GU:"Guam", GW:"Guinea-Bissau", GY:"Guyana", HK:"Hongkong",
+  HM:"Heard- und McDonaldinseln", HN:"Honduras", HR:"Kroatien", HT:"Haiti", HU:"Ungarn",
+  ID:"Indonesien", IE:"Irland", IL:"Israel", IM:"Isle of Man", IN:"Indien",
+  IO:"Britisches Territorium im Indischen Ozean", IQ:"Irak", IR:"Iran", IS:"Island", IT:"Italien",
+  JE:"Jersey", JM:"Jamaika", JO:"Jordanien", JP:"Japan", KE:"Kenia", KG:"Kirgisistan",
+  KH:"Kambodscha", KI:"Kiribati", KM:"Komoren", KN:"St. Kitts und Nevis", KP:"Nordkorea",
+  KR:"Südkorea", KW:"Kuwait", KY:"Kaimaninseln", KZ:"Kasachstan", LA:"Laos", LB:"Libanon",
+  LC:"St. Lucia", LI:"Liechtenstein", LK:"Sri Lanka", LR:"Liberia", LS:"Lesotho", LT:"Litauen",
+  LU:"Luxemburg", LV:"Lettland", LY:"Libyen", MA:"Marokko", MC:"Monaco", MD:"Moldau",
+  ME:"Montenegro", MF:"Saint-Martin", MG:"Madagaskar", MH:"Marshallinseln", MK:"Nordmazedonien",
+  ML:"Mali", MM:"Myanmar", MN:"Mongolei", MO:"Macau", MP:"Nördliche Marianen", MQ:"Martinique",
+  MR:"Mauretanien", MS:"Montserrat", MT:"Malta", MU:"Mauritius", MV:"Malediven", MW:"Malawi",
+  MX:"Mexiko", MY:"Malaysia", MZ:"Mosambik", NA:"Namibia", NC:"Neukaledonien", NE:"Niger",
+  NF:"Norfolkinsel", NG:"Nigeria", NI:"Nicaragua", NL:"Niederlande", NO:"Norwegen", NP:"Nepal",
+  NR:"Nauru", NU:"Niue", NZ:"Neuseeland", OM:"Oman", PA:"Panama", PE:"Peru",
+  PF:"Französisch-Polynesien", PG:"Papua-Neuguinea", PH:"Philippinen", PK:"Pakistan", PL:"Polen",
+  PM:"Saint-Pierre und Miquelon", PN:"Pitcairninseln", PR:"Puerto Rico", PS:"Palästina",
+  PT:"Portugal", PW:"Palau", PY:"Paraguay", QA:"Katar", RE:"Réunion", RO:"Rumänien", RS:"Serbien",
+  RU:"Russland", RW:"Ruanda", SA:"Saudi-Arabien", SB:"Salomonen", SC:"Seychellen", SD:"Sudan",
+  SE:"Schweden", SG:"Singapur", SH:"St. Helena", SI:"Slowenien", SJ:"Svalbard und Jan Mayen",
+  SK:"Slowakei", SL:"Sierra Leone", SM:"San Marino", SN:"Senegal", SO:"Somalia", SR:"Suriname",
+  SS:"Südsudan", ST:"São Tomé und Príncipe", SV:"El Salvador", SX:"Sint Maarten", SY:"Syrien",
+  SZ:"Eswatini", TC:"Turks- und Caicosinseln", TD:"Tschad",
+  TF:"Französische Süd- und Antarktisgebiete", TG:"Togo", TH:"Thailand", TJ:"Tadschikistan",
+  TK:"Tokelau", TL:"Osttimor", TM:"Turkmenistan", TN:"Tunesien", TO:"Tonga", TR:"Türkei",
+  TT:"Trinidad und Tobago", TV:"Tuvalu", TW:"Taiwan", TZ:"Tansania", UA:"Ukraine", UG:"Uganda",
+  UM:"Amerikanische Überseeinseln (Kleinere)", US:"Vereinigte Staaten", UY:"Uruguay",
+  UZ:"Usbekistan", VA:"Vatikanstadt", VC:"St. Vincent und die Grenadinen", VE:"Venezuela",
+  VG:"Britische Jungferninseln", VI:"Amerikanische Jungferninseln", VN:"Vietnam", VU:"Vanuatu",
+  WF:"Wallis und Futuna", WS:"Samoa", YE:"Jemen", YT:"Mayotte", ZA:"Südafrika", ZM:"Sambia",
+  ZW:"Simbabwe",
+};
+
+function countryName(code){
+  return COUNTRY_NAMES[code] || code;
 }
 
 // Zentrale Darstellung fuer Land-Werte: unterscheidet "echt unbekannt" (GeoIP-Ausfall
@@ -1574,7 +1724,7 @@ async function loadCrowdsecCurrent(){
         <td>${formatDurationShort(remainingS)}</td>
         <td>
           <button type="button" class="action-btn danger" data-action="unban" data-ip="${ip}">Ban löschen</button>
-          <button type="button" class="action-btn primary" data-action="whitelist" data-ip="${ip}">Whitelisten</button>
+          <button type="button" class="action-btn primary" data-action="whitelist" data-ip="${ip}" data-country="${escapeHtml(d.country_code || "")}">Whitelisten</button>
         </td>
       </tr>`;
     }).join("");
@@ -1606,10 +1756,12 @@ document.getElementById("crowdsec-current-body").addEventListener("click", async
     btn.disabled = true;
     try{
       const addRes = await fetch("/api/crowdsec/whitelist/entries", {
-        method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ value: ip })
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ value: ip, country_code: btn.dataset.country || "", note: "Aus aktivem CrowdSec-Ban whitelistet" })
       });
       const addData = await addRes.json();
-      if(!addRes.ok) throw new Error(addData.error || "Unbekannter Fehler beim Whitelisten");
+      // 409 = IP steht schon in der Whitelist - kein Fehler, dann einfach nur den Ban loeschen.
+      if(!addRes.ok && addRes.status !== 409) throw new Error(addData.error || "Unbekannter Fehler beim Whitelisten");
       await fetch(`/api/crowdsec/ban/${encodeURIComponent(ip)}`, { method: "DELETE" });
       loadCrowdsecCurrent();
       if(csWhitelistOpen) loadCrowdsecWhitelist();
@@ -1696,6 +1848,10 @@ csWhitelistToggle.addEventListener("keydown", (ev) => {
   if(ev.key === "Enter" || ev.key === " "){ ev.preventDefault(); setCsWhitelistOpen(!csWhitelistOpen); }
 });
 
+let wlEntries = { ip: [], cidr: [] };   // letzter geladener Stand, fuer den Edit-Klick (Zugriff per Wert)
+let wlEditingValue = null;              // null = Add-Modus, sonst der urspruengliche Wert im Edit-Modus
+let wlSelectedCountry = "";             // "" = kein Land gewaehlt
+
 async function loadCrowdsecWhitelist(){
   const body = document.getElementById("crowdsec-whitelist-body");
   const dirtyNote = document.getElementById("cs-whitelist-dirty-note");
@@ -1704,29 +1860,148 @@ async function loadCrowdsecWhitelist(){
     const res = await fetch("/api/crowdsec/whitelist");
     const data = await res.json();
     if(!data.configured){
-      body.innerHTML = `<tr><td colspan="3" style="color:var(--muted)">Whitelist-Verwaltung nicht konfiguriert</td></tr>`;
+      body.innerHTML = `<tr><td colspan="5" style="color:var(--muted)">Whitelist-Verwaltung nicht konfiguriert</td></tr>`;
       dirtyNote.style.display = "none";
       applyBtn.style.display = "none";
       return;
     }
+    wlEntries = { ip: data.ip, cidr: data.cidr };
     const rows = [
-      ...data.ip.map(v => ({ type: "IP", value: v })),
-      ...data.cidr.map(v => ({ type: "CIDR", value: v })),
+      ...data.ip.map(e => ({ type: "IP", kind: "ip", ...e })),
+      ...data.cidr.map(e => ({ type: "CIDR", kind: "cidr", ...e })),
     ];
-    body.innerHTML = rows.length ? rows.map(r => `<tr>
-      <td>${r.type}</td>
+    body.innerHTML = rows.length ? rows.map(r => `<tr class="wl-row-${r.kind}">
+      <td>${countryLabel(r.country_code)}</td>
+      <td><span class="badge ${r.kind === "ip" ? "info" : "warn"}">${r.type}</span></td>
       <td>${escapeHtml(r.value)}</td>
-      <td><button type="button" class="action-btn danger" data-remove="${escapeHtml(r.value)}">Entfernen</button></td>
-    </tr>`).join("") : `<tr><td colspan="3" style="color:var(--muted)">Keine Einträge</td></tr>`;
+      <td>${r.note ? `<span class="note-cell" title="${escapeHtml(r.note)}">${escapeHtml(r.note)}</span>` : `<span class="note-cell empty">–</span>`}</td>
+      <td>
+        <button type="button" class="action-btn" data-edit="${escapeHtml(r.value)}">Bearbeiten</button>
+        <button type="button" class="action-btn danger" data-remove="${escapeHtml(r.value)}">Entfernen</button>
+      </td>
+    </tr>`).join("") : `<tr><td colspan="5" style="color:var(--muted)">Keine Einträge</td></tr>`;
     dirtyNote.style.display = data.dirty ? "inline" : "none";
     applyBtn.style.display = data.dirty ? "inline-block" : "none";
   }catch(e){
     console.warn("Whitelist konnte nicht geladen werden", e);
-    body.innerHTML = `<tr><td colspan="3" style="color:var(--muted)">Fehler beim Laden</td></tr>`;
+    body.innerHTML = `<tr><td colspan="5" style="color:var(--muted)">Fehler beim Laden</td></tr>`;
   }
 }
 
+function findWlEntry(value){
+  return wlEntries.ip.find(e => e.value === value) || wlEntries.cidr.find(e => e.value === value);
+}
+
+// --- Add/Edit-Formular ---
+
+function renderWlCountrySelected(){
+  const el = document.getElementById("wl-country-selected");
+  if(!wlSelectedCountry){
+    el.classList.remove("show");
+    el.innerHTML = "";
+    return;
+  }
+  el.classList.add("show");
+  el.innerHTML = `${flagEmoji(wlSelectedCountry)} ${countryName(wlSelectedCountry)}<button type="button" id="wl-country-clear" aria-label="Land entfernen">✕</button>`;
+}
+
+function selectWlCountry(code){
+  wlSelectedCountry = code;
+  renderWlCountrySelected();
+  const search = document.getElementById("wl-f-country-search");
+  search.value = "";
+  closeWlCountryDropdown();
+}
+
+function renderWlCountryDropdown(query){
+  const dropdown = document.getElementById("wl-country-dropdown");
+  const q = query.trim().toLowerCase();
+  const matches = Object.keys(COUNTRY_NAMES)
+    .filter(code => !q || countryName(code).toLowerCase().includes(q) || code.toLowerCase().includes(q))
+    .sort((a, b) => countryName(a).localeCompare(countryName(b), "de"))
+    .slice(0, 30);
+  dropdown.innerHTML = matches.length
+    ? matches.map(code => `<div class="wl-country-option" data-code="${code}"><span>${flagEmoji(code)}</span><span>${countryName(code)}</span><span class="code">${code}</span></div>`).join("")
+    : `<div class="no-results">Keine Treffer</div>`;
+  dropdown.classList.add("open");
+}
+
+function closeWlCountryDropdown(){
+  document.getElementById("wl-country-dropdown").classList.remove("open");
+}
+
+const wlCountrySearch = document.getElementById("wl-f-country-search");
+wlCountrySearch.addEventListener("focus", () => renderWlCountryDropdown(wlCountrySearch.value));
+wlCountrySearch.addEventListener("input", () => renderWlCountryDropdown(wlCountrySearch.value));
+document.getElementById("wl-country-dropdown").addEventListener("mousedown", (ev) => {
+  const opt = ev.target.closest("[data-code]");
+  if(opt) selectWlCountry(opt.dataset.code);
+});
+document.getElementById("wl-country-selected").addEventListener("click", (ev) => {
+  if(ev.target.closest("#wl-country-clear")) selectWlCountry("");
+});
+document.addEventListener("click", (ev) => {
+  if(!ev.target.closest(".wl-country-picker")) closeWlCountryDropdown();
+});
+
+function openWhitelistForm(entry){
+  wlEditingValue = entry ? entry.value : null;
+  document.getElementById("wl-f-value").value = entry ? entry.value : "";
+  document.getElementById("wl-f-note").value = entry ? (entry.note || "") : "";
+  wlSelectedCountry = entry ? (entry.country_code || "") : "";
+  renderWlCountrySelected();
+  document.getElementById("wl-f-error").textContent = "";
+  document.getElementById("wl-f-save").textContent = entry ? "Speichern" : "Hinzufügen";
+  document.getElementById("cs-whitelist-form").style.display = "block";
+  document.getElementById("wl-f-value").focus();
+}
+
+function closeWhitelistForm(){
+  document.getElementById("cs-whitelist-form").style.display = "none";
+  wlEditingValue = null;
+}
+
+document.getElementById("cs-whitelist-add-btn").addEventListener("click", () => openWhitelistForm(null));
+document.getElementById("wl-f-cancel").addEventListener("click", closeWhitelistForm);
+
+document.getElementById("wl-f-save").addEventListener("click", async () => {
+  const errorEl = document.getElementById("wl-f-error");
+  const btn = document.getElementById("wl-f-save");
+  const value = document.getElementById("wl-f-value").value.trim();
+  const note = document.getElementById("wl-f-note").value.trim();
+  if(!value){ errorEl.textContent = "IP oder CIDR fehlt."; return; }
+
+  const payload = { value, note, country_code: wlSelectedCountry };
+  const isEdit = wlEditingValue !== null;
+  if(isEdit) payload.old_value = wlEditingValue;
+
+  btn.disabled = true;
+  errorEl.textContent = "";
+  try{
+    const res = await fetch("/api/crowdsec/whitelist/entries", {
+      method: isEdit ? "PUT" : "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.error || "Unbekannter Fehler");
+    closeWhitelistForm();
+    loadCrowdsecWhitelist();
+  }catch(e){
+    errorEl.textContent = e.message;
+  }finally{
+    btn.disabled = false;
+  }
+});
+
+document.getElementById("wl-f-value").addEventListener("keydown", (ev) => {
+  if(ev.key === "Enter"){ ev.preventDefault(); document.getElementById("wl-f-save").click(); }
+});
+
 document.getElementById("crowdsec-whitelist-body").addEventListener("click", async (ev) => {
+  const editBtn = ev.target.closest("[data-edit]");
+  if(editBtn){ openWhitelistForm(findWlEntry(editBtn.dataset.edit)); return; }
+
   const btn = ev.target.closest("[data-remove]");
   if(!btn) return;
   const value = btn.dataset.remove;
@@ -1736,32 +2011,12 @@ document.getElementById("crowdsec-whitelist-body").addEventListener("click", asy
     const res = await fetch(`/api/crowdsec/whitelist/entries?value=${encodeURIComponent(value)}`, { method: "DELETE" });
     const data = await res.json();
     if(!res.ok) throw new Error(data.error || "Unbekannter Fehler");
+    if(wlEditingValue === value) closeWhitelistForm();
     loadCrowdsecWhitelist();
   }catch(e){
     alert(`Entfernen fehlgeschlagen: ${e.message}`);
     btn.disabled = false;
   }
-});
-
-async function addCrowdsecWhitelistEntry(){
-  const input = document.getElementById("cs-whitelist-input");
-  const value = input.value.trim();
-  if(!value) return;
-  try{
-    const res = await fetch("/api/crowdsec/whitelist/entries", {
-      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ value })
-    });
-    const data = await res.json();
-    if(!res.ok) throw new Error(data.error || "Unbekannter Fehler");
-    input.value = "";
-    loadCrowdsecWhitelist();
-  }catch(e){
-    alert(`Hinzufügen fehlgeschlagen: ${e.message}`);
-  }
-}
-document.getElementById("cs-whitelist-add-btn").addEventListener("click", addCrowdsecWhitelistEntry);
-document.getElementById("cs-whitelist-input").addEventListener("keydown", (ev) => {
-  if(ev.key === "Enter"){ ev.preventDefault(); addCrowdsecWhitelistEntry(); }
 });
 
 document.getElementById("cs-whitelist-apply-btn").addEventListener("click", async (ev) => {

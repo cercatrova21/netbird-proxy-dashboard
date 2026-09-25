@@ -213,6 +213,23 @@ def init_db():
     # migrate_schema(), weil crowdsec_alerts erst hier oben angelegt wird.
     if "fp_notified" not in {row["name"] for row in conn.execute("PRAGMA table_info(crowdsec_alerts)")}:
         conn.execute("ALTER TABLE crowdsec_alerts ADD COLUMN fp_notified INTEGER NOT NULL DEFAULT 0")
+    # Notiz + Herkunftsland je Whitelist-Eintrag - bewusst eine eigene Tabelle statt
+    # zusaetzlicher Keys in der von CrowdSec selbst gelesenen Postoverflow-YAML
+    # (WHITELIST_FILE_PATH): unbekannte Schluessel dort ungetestet zu riskieren nur
+    # fuer Dashboard-Metadaten war nicht noetig. Der Eintragswert (IP/CIDR-String)
+    # bleibt weiterhin die alleinige Quelle der Wahrheit in der YAML; diese Tabelle
+    # haengt nur Notiz/Land daran, per value als Schluessel.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS crowdsec_whitelist_meta (
+            value TEXT PRIMARY KEY,
+            note TEXT,
+            country_code TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
     conn.commit()
     conn.close()
 
@@ -619,6 +636,71 @@ def check_crowdsec_fp_notifications():
                 )
                 conn.commit()
     conn.close()
+
+
+def get_whitelist_meta_map():
+    conn = get_conn()
+    rows = conn.execute("SELECT value, note, country_code FROM crowdsec_whitelist_meta").fetchall()
+    conn.close()
+    return {r["value"]: {"note": r["note"] or "", "country_code": r["country_code"] or ""} for r in rows}
+
+
+def upsert_whitelist_meta(value, note, country_code):
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with _db_lock:
+        conn = get_conn()
+        conn.execute(
+            """
+            INSERT INTO crowdsec_whitelist_meta (value, note, country_code, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(value) DO UPDATE SET note = excluded.note, country_code = excluded.country_code, updated_at = excluded.updated_at
+            """,
+            (value, note, country_code, now, now),
+        )
+        conn.commit()
+        conn.close()
+
+
+def delete_whitelist_meta(value):
+    with _db_lock:
+        conn = get_conn()
+        conn.execute("DELETE FROM crowdsec_whitelist_meta WHERE value = ?", (value,))
+        conn.commit()
+        conn.close()
+
+
+def rename_whitelist_meta(old_value, new_value):
+    with _db_lock:
+        conn = get_conn()
+        conn.execute("DELETE FROM crowdsec_whitelist_meta WHERE value = ?", (new_value,))
+        conn.execute("UPDATE crowdsec_whitelist_meta SET value = ? WHERE value = ?", (new_value, old_value))
+        conn.commit()
+        conn.close()
+
+
+def guess_whitelist_country(value):
+    """Bestmoegliche automatische Land-Vorbelegung fuer einen neuen Whitelist-
+    Eintrag, aus bereits vorhandenen Daten statt einem eigenen GeoIP-Download:
+    zuerst die letzte bekannte CrowdSec-Alert-Anreicherung (source.cn, siehe
+    sync_crowdsec), sonst das letzte gesehene proxy_events.country_code fuer
+    dieselbe IP. Nur fuer einzelne IPs sinnvoll - ein CIDR-Block deckt in der
+    Regel kein einzelnes Land ab, dafuer gibt es keine Heuristik."""
+    if "/" in value:
+        return ""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT country_code FROM crowdsec_alerts WHERE source_ip = ? AND country_code IS NOT NULL AND country_code != '' "
+        "ORDER BY created_at DESC LIMIT 1",
+        (value,),
+    ).fetchone()
+    if not row:
+        row = conn.execute(
+            "SELECT country_code FROM proxy_events WHERE source_ip = ? AND country_code IS NOT NULL AND country_code != '' "
+            "ORDER BY timestamp DESC LIMIT 1",
+            (value,),
+        ).fetchone()
+    conn.close()
+    return row["country_code"] if row else ""
 
 
 def read_whitelist_file():
@@ -1689,6 +1771,34 @@ def api_crowdsec_fp_criteria_set():
     return jsonify(countries=countries, isp_keywords=isp_keywords)
 
 
+def _validate_whitelist_value(value):
+    """Gibt (kind, error_response_or_None) zurueck."""
+    kind = "cidr" if "/" in value else "ip"
+    try:
+        if kind == "ip":
+            ipaddress.ip_address(value)
+        else:
+            ipaddress.ip_network(value, strict=False)
+    except ValueError:
+        return kind, (jsonify(error=f"'{value}' ist keine gueltige IP-Adresse oder CIDR-Range"), 400)
+    return kind, None
+
+
+def _whitelist_response(data, dirty):
+    meta = get_whitelist_meta_map()
+
+    def enrich(value):
+        m = meta.get(value, {})
+        return {"value": value, "note": m.get("note", ""), "country_code": m.get("country_code", "")}
+
+    return jsonify(
+        configured=True,
+        ip=[enrich(v) for v in data["whitelist"]["ip"]],
+        cidr=[enrich(v) for v in data["whitelist"]["cidr"]],
+        dirty=dirty,
+    )
+
+
 @app.route("/api/crowdsec/whitelist")
 def api_crowdsec_whitelist_get():
     if not WHITELIST_FILE_PATH:
@@ -1699,25 +1809,26 @@ def api_crowdsec_whitelist_get():
         log.warning("Whitelist-Datei nicht lesbar: %s", exc)
         return jsonify(configured=False, error=str(exc), ip=[], cidr=[], dirty=False)
     dirty = get_sync_state("whitelist_dirty") == "1"
-    return jsonify(configured=True, ip=data["whitelist"]["ip"], cidr=data["whitelist"]["cidr"], dirty=dirty)
+    return _whitelist_response(data, dirty)
 
 
 @app.route("/api/crowdsec/whitelist/entries", methods=["POST"])
 def api_crowdsec_whitelist_add():
     if not WHITELIST_FILE_PATH:
         return jsonify(error="Whitelist-Datei nicht konfiguriert"), 400
-    value = ((request.get_json(silent=True) or {}).get("value") or "").strip()
+    body = request.get_json(silent=True) or {}
+    value = (body.get("value") or "").strip()
+    note = (body.get("note") or "").strip()
+    country_code = (body.get("country_code") or "").strip().upper()
     if not value:
         return jsonify(error="Kein Wert angegeben"), 400
 
-    kind = "cidr" if "/" in value else "ip"
-    try:
-        if kind == "ip":
-            ipaddress.ip_address(value)
-        else:
-            ipaddress.ip_network(value, strict=False)
-    except ValueError:
-        return jsonify(error=f"'{value}' ist keine gueltige IP-Adresse oder CIDR-Range"), 400
+    kind, err = _validate_whitelist_value(value)
+    if err:
+        return err
+
+    if not country_code:
+        country_code = guess_whitelist_country(value)
 
     with _whitelist_lock:
         try:
@@ -1725,12 +1836,61 @@ def api_crowdsec_whitelist_add():
         except OSError as exc:
             return jsonify(error=str(exc)), 500
         entries = data["whitelist"][kind]
-        if value not in entries:
-            entries.append(value)
+        if value in entries:
+            return jsonify(error=f"'{value}' ist bereits in der Whitelist"), 409
+        entries.append(value)
+        write_whitelist_file(data)
+        set_sync_state("whitelist_dirty", "1")
+        upsert_whitelist_meta(value, note, country_code)
+
+    return _whitelist_response(data, True)
+
+
+@app.route("/api/crowdsec/whitelist/entries", methods=["PUT"])
+def api_crowdsec_whitelist_update():
+    """Bearbeitet einen bestehenden Eintrag. Notiz/Land liegen ausschliesslich
+    in crowdsec_whitelist_meta und wirken sofort - nur eine Aenderung am
+    eigentlichen IP/CIDR-Wert beruehrt die von CrowdSec gelesene YAML und
+    setzt damit "dirty" (Neustart noetig), analog zu Add/Remove."""
+    if not WHITELIST_FILE_PATH:
+        return jsonify(error="Whitelist-Datei nicht konfiguriert"), 400
+    body = request.get_json(silent=True) or {}
+    old_value = (body.get("old_value") or "").strip()
+    new_value = (body.get("value") or "").strip()
+    note = (body.get("note") or "").strip()
+    country_code = (body.get("country_code") or "").strip().upper()
+    if not old_value or not new_value:
+        return jsonify(error="Kein Wert angegeben"), 400
+
+    new_kind, err = _validate_whitelist_value(new_value)
+    if err:
+        return err
+    old_kind = "cidr" if "/" in old_value else "ip"
+
+    with _whitelist_lock:
+        try:
+            data = read_whitelist_file()
+        except OSError as exc:
+            return jsonify(error=str(exc)), 500
+
+        if old_value not in data["whitelist"][old_kind]:
+            return jsonify(error=f"'{old_value}' nicht in der Whitelist gefunden"), 404
+
+        value_changed = new_value != old_value
+        if value_changed and new_value in data["whitelist"][new_kind]:
+            return jsonify(error=f"'{new_value}' ist bereits in der Whitelist"), 409
+
+        dirty = get_sync_state("whitelist_dirty") == "1"
+        if value_changed:
+            data["whitelist"][old_kind].remove(old_value)
+            data["whitelist"][new_kind].append(new_value)
             write_whitelist_file(data)
             set_sync_state("whitelist_dirty", "1")
+            dirty = True
+            rename_whitelist_meta(old_value, new_value)
+        upsert_whitelist_meta(new_value, note, country_code)
 
-    return jsonify(configured=True, ip=data["whitelist"]["ip"], cidr=data["whitelist"]["cidr"], dirty=True)
+    return _whitelist_response(data, dirty)
 
 
 @app.route("/api/crowdsec/whitelist/entries", methods=["DELETE"])
@@ -1754,9 +1914,10 @@ def api_crowdsec_whitelist_remove():
         if changed:
             write_whitelist_file(data)
             set_sync_state("whitelist_dirty", "1")
+            delete_whitelist_meta(value)
 
     dirty = get_sync_state("whitelist_dirty") == "1"
-    return jsonify(configured=True, ip=data["whitelist"]["ip"], cidr=data["whitelist"]["cidr"], dirty=dirty)
+    return _whitelist_response(data, dirty)
 
 
 @app.route("/api/crowdsec/whitelist/apply", methods=["POST"])
