@@ -45,7 +45,8 @@ main LAPI's config.
 | `netbird-logparser/acquis.yaml` | Tails the `netbird-proxy` container (backend errors) and the `netbird-proxy-dashboard` container (denied requests) via Docker log acquisition. |
 | `parsers/s01-parse/netbird-proxy-errors.yaml` | Parses the proxy's own `proxy error: ...` stdout lines (real backend failures, e.g. 502s). |
 | `parsers/s01-parse/netbird-proxy-access-denied.yaml` | Parses this dashboard's `security_event ...` lines (401/404/405/etc., across all hosted domains). |
-| `scenarios/netbird-proxy-auth-bruteforce.yaml` | 5 auth failures from one IP within 60s -> 15 min ban. |
+| `scenarios/netbird-proxy-auth-bruteforce.yaml` | 5 auth failures from one IP within 60s -> 15 min ban. Excludes hosts listed in `netbird-proxy-auth-bruteforce-sso.yaml`. |
+| `scenarios/netbird-proxy-auth-bruteforce-sso.yaml` | Same as above but capacity 30 instead of 5, for hosts behind SSO whose frontend fires a burst of parallel API calls on page load - each one 401s until the SSO session is recognized, which trips the default threshold on every single real login. List your own SSO-gated host(s) here instead of the placeholder domain. |
 | `scenarios/netbird-proxy-access-flood.yaml` | 40 denied/not-found requests from one IP within 60s -> 10 min ban. Catches systematic scanning across all hosted domains. |
 | `scenarios/netbird-proxy-error-flood.yaml` | 15 real backend errors from one IP within 30s -> 5 min ban. |
 | `scenarios/netbird-proxy-sensitive-path.yaml` | Immediate ban (10 min) on the first request to a known exploit/config/webshell path (`.env`, `.git/`, `wp-admin`, `.php`, `phpmyadmin`, etc.) on any hosted domain. |

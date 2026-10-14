@@ -9,8 +9,15 @@ description: >
   ausgenommen: WebDAV/CalDAV-Sync-Clients (u.a. Nextcloud Desktop) schicken bei
   jedem Sync-Zyklus einen unauthentifizierten OPTIONS-Preflight, der
   routinemaessig mit 401 beantwortet wird - kein Bruteforce-Indikator, sondern
-  normales Clientverhalten (beobachtet auf nextcloud.example.com).
-filter: "evt.Meta.log_type == 'netbird-proxy-access-denied' && evt.Meta.deny_reason == 'Authentication failed' && evt.Meta.http_method != 'OPTIONS'"
+  normales Clientverhalten (beobachtet auf nextcloud.example.com). SSO-geschuetzte
+  Hosts mit einer Single-Page-App dahinter (Platzhalter-Domain, im eigenen
+  Deployment durch die echte Domain ersetzen) sind ebenfalls ausgenommen - deren
+  Frontend feuert beim Laden ein Dutzend paralleler API-Calls, die alle
+  gleichzeitig 401 bekommen, solange die SSO-Session noch nicht erkannt ist (bis
+  zu 25 Fehlversuche/60s bei einem einzelnen echten Login beobachtet, weit ueber
+  dieser Schwelle von 5) - siehe netbird-proxy-auth-bruteforce-sso.yaml fuer die
+  fuer solche Hosts passende, hoehere Schwelle statt eines kompletten Ausschlusses.
+filter: "evt.Meta.log_type == 'netbird-proxy-access-denied' && evt.Meta.deny_reason == 'Authentication failed' && evt.Meta.http_method != 'OPTIONS' && evt.Meta.target_host != 'sso-app.example.com'"
 leakspeed: "60s"
 capacity: 5
 groupby: "evt.Meta.source_ip"

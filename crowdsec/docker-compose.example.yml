@@ -51,6 +51,7 @@ services:
       - ./crowdsec/netbird-logparser/scenarios/netbird-proxy-sensitive-path.yaml:/etc/crowdsec/scenarios/netbird-proxy-sensitive-path.yaml:ro
       - ./crowdsec/netbird-logparser/scenarios/netbird-proxy-error-flood.yaml:/etc/crowdsec/scenarios/netbird-proxy-error-flood.yaml:ro
       - ./crowdsec/netbird-logparser/scenarios/netbird-proxy-auth-bruteforce.yaml:/etc/crowdsec/scenarios/netbird-proxy-auth-bruteforce.yaml:ro
+      - ./crowdsec/netbird-logparser/scenarios/netbird-proxy-auth-bruteforce-sso.yaml:/etc/crowdsec/scenarios/netbird-proxy-auth-bruteforce-sso.yaml:ro
       - ./crowdsec/netbird-logparser/scenarios/netbird-proxy-access-flood.yaml:/etc/crowdsec/scenarios/netbird-proxy-access-flood.yaml:ro
       - ./crowdsec/netbird-logparser/postoverflows/s01-whitelist/netbird-proxy-whitelist.yaml:/etc/crowdsec/postoverflows/s01-whitelist/netbird-proxy-whitelist.yaml:ro
 

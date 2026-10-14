@@ -1,0 +1,24 @@
+type: leaky
+name: netbird-proxy/auth-bruteforce-sso
+description: >
+  Wie netbird-proxy/auth-bruteforce, aber mit einer hoeheren Schwelle fuer Hosts
+  hinter NetBird-SSO, deren Single-Page-App-Frontend beim Laden ein Dutzend
+  paralleler API-Calls feuert - die bekommen alle gleichzeitig ein 401, solange
+  die SSO-Session noch nicht erkannt ist, kein echter Credential-Versuch (den
+  macht der Identity-Provider, nicht dieser Proxy). In der Dashboard-DB
+  beobachtet auf sso-app.example.com (Platzhalter-Domain, im eigenen Deployment
+  durch die echte Domain ersetzen, mehrere mit || verknuepfen): bis zu 13
+  Fehlversuche in unter einer Sekunde pro Seitenaufruf, bis zu 25 in 60s bei
+  zwei aufeinanderfolgenden Versuchen derselben echten Nutzerin. Kapazitaet 30
+  toleriert das komfortabel, bleibt aber weit unter den echten Angriffsraten
+  aus netbird-proxy/auth-bruteforce (154-294 Fehlversuche) - andere Hosts nutzen
+  weiterhin die strikte Schwelle von 5 dort.
+filter: "evt.Meta.log_type == 'netbird-proxy-access-denied' && evt.Meta.deny_reason == 'Authentication failed' && evt.Meta.http_method != 'OPTIONS' && evt.Meta.target_host == 'sso-app.example.com'"
+leakspeed: "60s"
+capacity: 30
+groupby: "evt.Meta.source_ip"
+blackhole: 15m
+labels:
+  service: http
+  type: bruteforce
+  remediation: true
