@@ -170,7 +170,8 @@ def init_db():
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_timestamp ON proxy_events(timestamp)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_country ON proxy_events(country_code)")
+    # Redundant zu idx_events_country_ts (country_code ist dessen erste Spalte).
+    conn.execute("DROP INDEX IF EXISTS idx_events_country")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_host ON proxy_events(host)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_source_ip ON proxy_events(source_ip)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_user_id ON proxy_events(user_id)")
