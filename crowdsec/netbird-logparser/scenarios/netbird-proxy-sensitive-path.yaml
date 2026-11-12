@@ -9,6 +9,12 @@ description: >
   Nextclouds legitime Front-Controller remote.php (WebDAV/CalDAV/CardDAV) und
   index.php werden vom generischen .php-Check ausgenommen, sonst matcht z.B.
   /remote.php/dav faelschlich (beobachtet auf nextcloud.example.com).
+  Secret-/CI-Datei-Pfade (.npmrc, .git-credentials, terraform.tfstate etc.)
+  kuratiert aus der IPv64.net Honeypot64 Attack-Paths-Liste (CC BY 4.0,
+  https://ipv64.net/honeypot/stats.php) - nur eindeutige Pfade, gegen die
+  Dashboard-DB geprueft (kein Treffer von IPs mit authentifizierten Requests);
+  generische Eintraege der Liste wie /login, /admin, /config.js, /health
+  bewusst nicht uebernommen, die werden von hier gehosteten Apps legitim genutzt.
 filter: >
   (evt.Meta.log_type == 'netbird-proxy-error' || evt.Meta.log_type == 'netbird-proxy-access-denied') &&
   (evt.Meta.http_path contains '.git/' ||
@@ -26,6 +32,30 @@ filter: >
    evt.Meta.http_path contains 'docker-compose.yaml' ||
    evt.Meta.http_path contains '.vscode/' ||
    evt.Meta.http_path contains '/actuator/' ||
+   evt.Meta.http_path contains '.git-credentials' ||
+   evt.Meta.http_path contains '.gitmodules' ||
+   evt.Meta.http_path contains '.npmrc' ||
+   evt.Meta.http_path contains '.netrc' ||
+   evt.Meta.http_path contains '.pypirc' ||
+   evt.Meta.http_path contains '/.boto' ||
+   evt.Meta.http_path contains '.s3cfg' ||
+   evt.Meta.http_path contains '/.docker/' ||
+   evt.Meta.http_path contains '.gitlab-ci.yml' ||
+   evt.Meta.http_path contains '/.github/workflows/' ||
+   evt.Meta.http_path contains '/.svn/' ||
+   evt.Meta.http_path contains 'terraform.tfstate' ||
+   evt.Meta.http_path contains 'terraform.tfvars' ||
+   evt.Meta.http_path contains 'credentials.json' ||
+   evt.Meta.http_path contains 'service-account.json' ||
+   evt.Meta.http_path contains 'firebase-adminsdk' ||
+   evt.Meta.http_path contains 'secrets.json' ||
+   evt.Meta.http_path contains '/appsettings.' ||
+   evt.Meta.http_path contains 'database.sql' ||
+   evt.Meta.http_path contains '/phpinfo' ||
+   evt.Meta.http_path contains '/_profiler/' ||
+   evt.Meta.http_path contains 'laravel.log' ||
+   evt.Meta.http_path contains '/.claude/' ||
+   evt.Meta.http_path contains '/.cursor/' ||
    (evt.Meta.http_path contains '.php' &&
     !(evt.Meta.http_path contains '/remote.php') &&
     !(evt.Meta.http_path contains '/index.php')) ||
