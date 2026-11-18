@@ -20,6 +20,11 @@ services:
       ASN_MMDB_URL: ${ASN_MMDB_URL:-https://hub-data.crowdsec.net/mmdb_update/GeoLite2-ASN.mmdb}
       CROWDSEC_FP_NOTIFY_URL: ${CROWDSEC_FP_NOTIFY_URL:-}
       CROWDSEC_FP_NOTIFY_TOKEN: ${CROWDSEC_FP_NOTIFY_TOKEN:-}
+      BACKUP_SYNC_HOST: ${BACKUP_SYNC_HOST:-}
+      BACKUP_SYNC_USER: ${BACKUP_SYNC_USER:-root}
+      BACKUP_SYNC_DEST: ${BACKUP_SYNC_DEST:-/opt/backup-proxy/certs}
+      BACKUP_SYNC_REMOTE_CMD: ${BACKUP_SYNC_REMOTE_CMD:-/opt/backup-proxy/regenerate-nginx.sh}
+      BACKUP_SYNC_INTERVAL_MINUTES: ${BACKUP_SYNC_INTERVAL_MINUTES:-15}
       TZ: ${TZ:-Europe/Zurich}
     volumes:
       - ./data:/data
@@ -30,6 +35,10 @@ services:
       # Die lokale CrowdSec-Whitelist-Datei von netbird-logparser - hier kann das
       # Dashboard Eintraege hinzufuegen/entfernen (wirksam erst nach obigem Neustart).
       - ${WHITELIST_HOST_FILE_PATH:-/opt/netbird/netbird-logparser/postoverflows/s01-whitelist/netbird-proxy-whitelist.yaml}:/whitelist/netbird-proxy-whitelist.yaml
+      # Backup-Proxy-Sync: Zertifikate von netbird-proxy (nur lesend) + SSH-Key fuer
+      # rsync/ssh auf den Backup-Proxy. Ohne BACKUP_SYNC_HOST bleibt beides ungenutzt.
+      - ${BACKUP_SYNC_HOST_CERT_DIR:-/var/lib/docker/volumes/root_netbird_proxy_certs/_data}:/backup-sync/certs:ro
+      - ${BACKUP_SYNC_HOST_SSH_KEY:-/root/.ssh/backup-proxy-sync}:/backup-sync/ssh_key:ro
     ports:
       # Bindet den Port NUR an deine eigene NetBird-Interface-IP.
       # Dadurch ist das Dashboard ausschliesslich ueber das NetBird-Mesh erreichbar

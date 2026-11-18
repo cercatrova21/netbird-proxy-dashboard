@@ -202,6 +202,30 @@ access is effectively root-equivalent on the host - only enable it if you're
 comfortable with that tradeoff, and definitely keep the dashboard off any
 network reachable by anyone you don't trust with that.
 
+## Backup proxy sync (optional)
+
+Mirrors every active NetBird reverse-proxy service (domain, first backend
+target, certificate + key from netbird-proxy's cert volume) to a second
+nginx box via `rsync --delete` over SSH, then runs a command there
+(`BACKUP_SYNC_REMOTE_CMD`) that regenerates the nginx server blocks from the
+synced `domains.conf`. Runs every `BACKUP_SYNC_INTERVAL_MINUTES` (default 15)
+inside the dashboard container - no host cron job needed.
+
+The `/backup-sync` page shows per-domain last sync time and status, the run
+history with per-run logs, a "sync now" button, and a toggle per domain to
+exclude it. New domains are synced by default; an excluded domain is removed
+from the backup proxy on the next run.
+
+Setup: set `BACKUP_SYNC_HOST` (plus the other `BACKUP_SYNC_*` values, see
+`.env.example`). The container mounts the cert volume read-only and the SSH
+private key. The SSH host key is stored in `data/backup-sync-known_hosts`
+(trust-on-first-use if the file doesn't exist yet - pre-seed it with
+`ssh-keygen -F <host> -f ~/.ssh/known_hosts > data/backup-sync-known_hosts`).
+
+Safety nets: a run aborts without touching the backup proxy if the NetBird
+API returns no active services, or if none of the domains to sync has a
+readable certificate (e.g. broken cert mount).
+
 ## API reference
 
 The frontend consumes these; they're plain JSON and can be queried directly
@@ -213,6 +237,10 @@ The frontend consumes these; they're plain JSON and can be queried directly
   newest first (max `limit` is 500).
 - `GET /api/poller-status` - poller sync lag, total event count, retention setting.
 - `GET /healthz` - basic liveness check.
+- `GET /api/backup-sync/status` - backup sync config, per-domain state, recent runs.
+- `POST /api/backup-sync/run` - trigger an immediate sync (async, 409 if one is running).
+- `PUT /api/backup-sync/domains/<domain>` with `{"sync_enabled": true|false}` - include/exclude a domain.
+- `GET /api/backup-sync/runs/<id>` - one run including its log output.
 
 Supported filters (as query params) on both `/api/stats` and `/api/events`:
 `host`, `country`, `ip`, `asn`, `path`, `city`, `user_id`, `status` (`allowed`/`denied`),

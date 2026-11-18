@@ -1,7 +1,11 @@
 import ipaddress
 import os
 import re
+import shlex
+import shutil
 import sqlite3
+import subprocess
+import tempfile
 import threading
 import time
 import json
@@ -81,6 +85,24 @@ CROWDSEC_FP_DEFAULT_ISP_KEYWORDS = ["bluewin", "sunrise", "telekom", "quickline"
 CROWDSEC_FP_NOTIFY_URL = os.environ.get("CROWDSEC_FP_NOTIFY_URL", "").rstrip("/")
 CROWDSEC_FP_NOTIFY_TOKEN = os.environ.get("CROWDSEC_FP_NOTIFY_TOKEN", "")
 
+# --- Backup-Proxy-Sync (optional) ---
+# Ersetzt den frueheren Host-Cronjob (backup-proxy/sync.sh): spiegelt alle aktiven
+# NetBird-Reverse-Proxy-Services (Domain + Backend-Ziel + Zertifikat/Key aus dem
+# Cert-Volume von netbird-proxy) per rsync auf einen Backup-Proxy und ruft dort
+# BACKUP_SYNC_REMOTE_CMD auf, das daraus die nginx-Server-Blocks erzeugt. Pro
+# Domain im Dashboard abschaltbar (Default: an). Leeres BACKUP_SYNC_HOST =
+# Feature deaktiviert.
+BACKUP_SYNC_HOST = os.environ.get("BACKUP_SYNC_HOST", "").strip()
+BACKUP_SYNC_USER = os.environ.get("BACKUP_SYNC_USER", "root").strip() or "root"
+BACKUP_SYNC_DEST = os.environ.get("BACKUP_SYNC_DEST", "/opt/backup-proxy/certs").rstrip("/")
+BACKUP_SYNC_REMOTE_CMD = os.environ.get("BACKUP_SYNC_REMOTE_CMD", "/opt/backup-proxy/regenerate-nginx.sh").strip()
+BACKUP_SYNC_CERT_DIR = os.environ.get("BACKUP_SYNC_CERT_DIR", "/backup-sync/certs")
+BACKUP_SYNC_SSH_KEY = os.environ.get("BACKUP_SYNC_SSH_KEY", "/backup-sync/ssh_key")
+BACKUP_SYNC_KNOWN_HOSTS = os.path.join(os.path.dirname(DB_PATH) or ".", "backup-sync-known_hosts")
+BACKUP_SYNC_INTERVAL_MINUTES = max(1, int(os.environ.get("BACKUP_SYNC_INTERVAL_MINUTES", "15")))
+BACKUP_SYNC_CONFIGURED = bool(BACKUP_SYNC_HOST and NB_API_BASE and NB_API_TOKEN)
+BACKUP_SYNC_RUNS_KEEP = 2000  # aelteste Laufprotokolle darueber hinaus werden verworfen
+
 if not NB_API_BASE or not NB_API_TOKEN:
     log.warning(
         "NB_API_BASE oder NB_API_TOKEN ist nicht gesetzt - der Poller kann keine Daten abrufen."
@@ -91,6 +113,11 @@ if ASN_ENRICHMENT_ENABLED:
     log.info("ASN-Anreicherung aktiviert - laedt bei Bedarf %s", ASN_MMDB_URL)
 if CROWDSEC_FP_NOTIFY_URL and CROWDSEC_FP_NOTIFY_TOKEN:
     log.info("CrowdSec-Fehlalarm-Benachrichtigung aktiviert -> %s", CROWDSEC_FP_NOTIFY_URL)
+if BACKUP_SYNC_CONFIGURED:
+    log.info(
+        "Backup-Proxy-Sync aktiviert -> %s@%s:%s alle %d Min.",
+        BACKUP_SYNC_USER, BACKUP_SYNC_HOST, BACKUP_SYNC_DEST, BACKUP_SYNC_INTERVAL_MINUTES,
+    )
 
 app = Flask(__name__)
 
@@ -230,6 +257,47 @@ def init_db():
             updated_at TEXT NOT NULL
         )
         """
+    )
+    # Backup-Proxy-Sync: eine Zeile pro je gesehener NetBird-Domain. sync_enabled
+    # ist die Nutzer-Uebersteuerung (Default 1 = wird synchronisiert), der Rest
+    # ist Status des letzten Laufs, siehe run_backup_sync().
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS backup_sync_domains (
+            domain TEXT PRIMARY KEY,
+            service_id TEXT,
+            sync_enabled INTEGER NOT NULL DEFAULT 1,
+            in_netbird INTEGER NOT NULL DEFAULT 1,
+            target TEXT,
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT,
+            last_synced_at TEXT,
+            last_status TEXT,
+            last_message TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS backup_sync_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            triggered_by TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            status TEXT NOT NULL,
+            synced_domains TEXT,
+            skipped_domains TEXT,
+            message TEXT,
+            output TEXT
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_backup_sync_runs_started ON backup_sync_runs(started_at)")
+    # Ein Lauf, der beim Container-Stop mitten drin abgebrochen wurde, bliebe sonst
+    # fuer immer "running".
+    conn.execute(
+        "UPDATE backup_sync_runs SET status = 'error', message = 'Abgebrochen (Dashboard neu gestartet)' "
+        "WHERE status = 'running'"
     )
     conn.commit()
     conn.close()
@@ -817,6 +885,338 @@ def poller_loop():
         except Exception:
             log.exception("Unerwarteter Fehler bei der ASN-Datenbank-Aktualisierung")
         time.sleep(POLL_INTERVAL_SECONDS)
+
+
+# ---------------------------------------------------------------------------
+# Backup-Proxy-Sync
+# ---------------------------------------------------------------------------
+
+# Domain/Host landen auf dem Backup-Proxy als Verzeichnisname bzw. in einer per
+# Shell-Heredoc generierten nginx-Config - nur harmlose Zeichen durchlassen.
+_DOMAIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
+_TARGET_HOST_RE = re.compile(r"^[A-Za-z0-9.:\-\[\]]{1,255}$")
+_PRIVKEY_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----\s*", re.S)
+
+_backup_sync_wake = threading.Event()
+_backup_sync_state = {"running": False, "run_id": None, "next_run_at": None, "pending_trigger": None}
+_backup_sync_state_lock = threading.Lock()
+
+
+class BackupSyncError(Exception):
+    pass
+
+
+def _now_iso():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def fetch_netbird_services():
+    resp = requests.get(
+        f"{NB_API_BASE}/api/reverse-proxies/services",
+        headers={"Accept": "application/json", "Authorization": f"Token {NB_API_TOKEN}"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if not isinstance(data, list):
+        raise BackupSyncError("Unerwartete Antwort der NetBird-API (keine Liste)")
+    return data
+
+
+def _service_target(svc):
+    """(scheme, host, port) des ersten Targets - identische Logik wie im frueheren
+    sync.sh (Port 0/leer -> Standardport des Protokolls)."""
+    t = (svc.get("targets") or [{}])[0]
+    scheme = (t.get("protocol") or "http").lower()
+    host = str(t.get("host") or "")
+    try:
+        port = int(t.get("port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+    if port == 0:
+        port = 443 if scheme == "https" else 80
+    return scheme, host, port
+
+
+def _is_active_http_service(svc):
+    return (
+        svc.get("enabled") is True
+        and svc.get("terminated") is False
+        and svc.get("mode") == "http"
+        and bool(svc.get("targets"))
+    )
+
+
+def split_cert_bundle(raw):
+    """Die Cert-Dateien von netbird-proxy enthalten Private Key + komplette Kette
+    in einer Datei. Gibt (privkey_pem, fullchain_pem) zurueck, je '' falls fehlend.
+    fullchain = alles ab dem ersten CERTIFICATE-Block (wie das awk im alten sync.sh)."""
+    m = _PRIVKEY_RE.search(raw)
+    privkey = m.group(0).rstrip() + "\n" if m else ""
+    idx = raw.find("-----BEGIN CERTIFICATE-----")
+    fullchain = raw[idx:] if idx >= 0 else ""
+    return privkey, fullchain
+
+
+def _ssh_base_cmd():
+    return [
+        "ssh", "-i", BACKUP_SYNC_SSH_KEY,
+        "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", f"UserKnownHostsFile={BACKUP_SYNC_KNOWN_HOSTS}",
+        "-o", "ConnectTimeout=20",
+    ]
+
+
+def _run_cmd(cmd, output, timeout):
+    output.append("$ " + " ".join(shlex.quote(c) for c in cmd))
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise BackupSyncError(f"Zeitueberschreitung nach {timeout}s: {cmd[0]}")
+    except OSError as exc:
+        raise BackupSyncError(f"{cmd[0]} konnte nicht gestartet werden: {exc}")
+    combined = (proc.stdout or "") + (proc.stderr or "")
+    if combined.strip():
+        output.append(combined.rstrip())
+    if proc.returncode != 0:
+        last_line = (proc.stderr or proc.stdout or "").strip().splitlines()[-1:] or [""]
+        raise BackupSyncError(f"{cmd[0]} fehlgeschlagen (Exit {proc.returncode}): {last_line[0]}")
+
+
+def _upsert_backup_sync_domains(conn, services, now):
+    """Gleicht die Domain-Tabelle mit der aktuellen NetBird-Liste ab. Neue
+    Domains bekommen sync_enabled=1 (Default: synchronisieren). Gibt
+    {domain: sync_enabled} fuer alle aktiven Domains zurueck."""
+    active = {}
+    inactive = set()
+    for svc in services:
+        domain = str(svc.get("domain") or "").strip().lower()
+        if not domain:
+            continue
+        if _is_active_http_service(svc):
+            active[domain] = svc
+        else:
+            inactive.add(domain)
+
+    for domain, svc in active.items():
+        scheme, host, port = _service_target(svc)
+        conn.execute(
+            """
+            INSERT INTO backup_sync_domains (domain, service_id, sync_enabled, in_netbird, target, first_seen_at, last_seen_at)
+            VALUES (?, ?, 1, 1, ?, ?, ?)
+            ON CONFLICT(domain) DO UPDATE SET
+                service_id = excluded.service_id, in_netbird = 1,
+                target = excluded.target, last_seen_at = excluded.last_seen_at
+            """,
+            (domain, svc.get("id"), f"{scheme}://{host}:{port}", now, now),
+        )
+
+    for row in conn.execute("SELECT domain FROM backup_sync_domains WHERE in_netbird = 1").fetchall():
+        if row["domain"] not in active:
+            msg = "In NetBird deaktiviert" if row["domain"] in inactive else "Nicht mehr in NetBird vorhanden"
+            conn.execute(
+                "UPDATE backup_sync_domains SET in_netbird = 0, last_status = 'not_in_netbird', last_message = ? WHERE domain = ?",
+                (msg, row["domain"]),
+            )
+
+    enabled = {
+        r["domain"]: bool(r["sync_enabled"])
+        for r in conn.execute("SELECT domain, sync_enabled FROM backup_sync_domains WHERE in_netbird = 1")
+    }
+    return active, enabled
+
+
+def run_backup_sync(triggered_by):
+    """Ein kompletter Sync-Lauf. Laeuft ausschliesslich im backup_sync_loop-Thread
+    (auch manuell ausgeloeste Laeufe), damit nie zwei Laeufe gleichzeitig rsyncen."""
+    started_at = _now_iso()
+    with _db_lock:
+        conn = get_conn()
+        cur = conn.execute(
+            "INSERT INTO backup_sync_runs (triggered_by, started_at, status) VALUES (?, ?, 'running')",
+            (triggered_by, started_at),
+        )
+        run_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+    with _backup_sync_state_lock:
+        _backup_sync_state.update(running=True, run_id=run_id)
+
+    output = []
+    synced = []           # Domains, die in diesem Lauf uebertragen werden
+    skipped = []          # [{domain, reason, message}]
+    status, message = "ok", None
+    workdir = tempfile.mkdtemp(prefix="backup-sync-")
+    try:
+        try:
+            services = fetch_netbird_services()
+        except requests.RequestException as exc:
+            raise BackupSyncError(f"NetBird-API nicht erreichbar: {exc}")
+
+        now = _now_iso()
+        with _db_lock:
+            conn = get_conn()
+            active, enabled = _upsert_backup_sync_domains(conn, services, now)
+            conn.commit()
+            conn.close()
+
+        # Sicherheitsnetz wie im alten Script: bei leerer/fehlerhafter API-Antwort
+        # NICHTS loeschen (rsync --delete wuerde sonst den Backup-Proxy leeren).
+        if not active:
+            raise BackupSyncError("Keine aktiven Services von der NetBird-API erhalten - Abbruch ohne Sync")
+
+        os.chmod(workdir, 0o755)
+        lines = []
+        wanted = 0
+        for domain in sorted(active):
+            svc = active[domain]
+            if not enabled.get(domain, True):
+                skipped.append({"domain": domain, "reason": "excluded", "message": "Vom Sync ausgeschlossen"})
+                continue
+            wanted += 1
+            scheme, host, port = _service_target(svc)
+            if not _DOMAIN_RE.match(domain) or scheme not in ("http", "https") or not _TARGET_HOST_RE.match(host):
+                skipped.append({"domain": domain, "reason": "invalid", "message": f"Ungueltige Domain/Ziel: {scheme}://{host}:{port}"})
+                continue
+            cert_src = os.path.join(BACKUP_SYNC_CERT_DIR, domain)
+            if not os.path.isfile(cert_src):
+                skipped.append({"domain": domain, "reason": "no_cert", "message": "Kein Zertifikat gefunden (evtl. noch nicht ausgestellt)"})
+                continue
+            with open(cert_src, "r", encoding="utf-8", errors="replace") as f:
+                privkey, fullchain = split_cert_bundle(f.read())
+            if not privkey or not fullchain:
+                skipped.append({"domain": domain, "reason": "no_cert", "message": "Zertifikatsdatei unvollstaendig (Key oder Kette fehlt)"})
+                continue
+
+            domain_dir = os.path.join(workdir, domain)
+            os.mkdir(domain_dir, 0o755)
+            os.chmod(domain_dir, 0o755)
+            for name, content in (("privkey.pem", privkey), ("fullchain.pem", fullchain)):
+                path = os.path.join(domain_dir, name)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                os.chmod(path, 0o644)  # wie bisher vom alten sync.sh erzeugt (nginx-Container liest als root)
+            lines.append(f"{domain};{scheme};{host};{port}")
+            synced.append(domain)
+
+        # Zweites Sicherheitsnetz: Domains sollen synchronisiert werden, aber kein
+        # einziges Zertifikat ist lesbar -> vermutlich fehlt der Cert-Mount. Nicht
+        # den kompletten Backup-Proxy leerraeumen.
+        if wanted and not synced:
+            raise BackupSyncError(
+                f"Fuer keine der {wanted} zu synchronisierenden Domains ist ein Zertifikat lesbar "
+                f"({BACKUP_SYNC_CERT_DIR}) - Abbruch ohne Sync"
+            )
+
+        conf_path = os.path.join(workdir, "domains.conf")
+        with open(conf_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + ("\n" if lines else ""))
+        os.chmod(conf_path, 0o644)
+        output.append(f"{len(synced)} Domain(s) vorbereitet, {len(skipped)} uebersprungen")
+
+        ssh_cmd = _ssh_base_cmd()
+        remote = f"{BACKUP_SYNC_USER}@{BACKUP_SYNC_HOST}"
+        _run_cmd(
+            ["rsync", "-az", "--delete", "-e", " ".join(shlex.quote(c) for c in ssh_cmd),
+             workdir + "/", f"{remote}:{BACKUP_SYNC_DEST}/"],
+            output, timeout=300,
+        )
+        if BACKUP_SYNC_REMOTE_CMD:
+            _run_cmd(ssh_cmd + [remote, BACKUP_SYNC_REMOTE_CMD], output, timeout=180)
+        message = f"{len(synced)} synchronisiert, {len(skipped)} uebersprungen"
+    except BackupSyncError as exc:
+        status, message = "error", str(exc)
+        output.append("FEHLER: " + message)
+    except Exception as exc:
+        log.exception("Backup-Proxy-Sync: unerwarteter Fehler")
+        status, message = "error", f"Unerwarteter Fehler: {exc}"
+        output.append("FEHLER: " + message)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    finished_at = _now_iso()
+    output_text = "\n".join(output)
+    if len(output_text) > 20000:
+        output_text = "... (gekuerzt)\n" + output_text[-20000:]
+
+    with _db_lock:
+        conn = get_conn()
+        if status == "ok":
+            conn.executemany(
+                "UPDATE backup_sync_domains SET last_synced_at = ?, last_status = 'ok', last_message = NULL WHERE domain = ?",
+                [(finished_at, d) for d in synced],
+            )
+        else:
+            # Nichts (vollstaendig) uebertragen - die vorbereiteten Domains als
+            # fehlgeschlagen markieren, last_synced_at bleibt beim letzten Erfolg.
+            conn.executemany(
+                "UPDATE backup_sync_domains SET last_status = 'error', last_message = ? WHERE domain = ?",
+                [(message, d) for d in synced],
+            )
+        conn.executemany(
+            "UPDATE backup_sync_domains SET last_status = ?, last_message = ? WHERE domain = ?",
+            [(s["reason"], s["message"], s["domain"]) for s in skipped],
+        )
+        conn.execute(
+            """
+            UPDATE backup_sync_runs SET finished_at = ?, status = ?, synced_domains = ?,
+                skipped_domains = ?, message = ?, output = ?
+            WHERE id = ?
+            """,
+            (finished_at, status, json.dumps(synced) if status == "ok" else json.dumps([]),
+             json.dumps(skipped), message, output_text, run_id),
+        )
+        conn.execute(
+            "DELETE FROM backup_sync_runs WHERE id <= (SELECT id FROM backup_sync_runs ORDER BY id DESC LIMIT 1 OFFSET ?)",
+            (BACKUP_SYNC_RUNS_KEEP,),
+        )
+        conn.commit()
+        conn.close()
+
+    with _backup_sync_state_lock:
+        _backup_sync_state.update(running=False, run_id=None)
+    (log.info if status == "ok" else log.error)("Backup-Proxy-Sync (%s): %s", triggered_by, message)
+
+
+def backup_sync_loop():
+    """Scheduler fuer den Backup-Proxy-Sync: alle BACKUP_SYNC_INTERVAL_MINUTES,
+    oder sofort, wenn /api/backup-sync/run _backup_sync_wake setzt. Nach einem
+    Neustart wird am letzten Lauf angeknuepft statt sofort erneut zu syncen."""
+    interval = BACKUP_SYNC_INTERVAL_MINUTES * 60
+    delay = 10
+    last = None
+    try:
+        conn = get_conn()
+        row = conn.execute("SELECT started_at FROM backup_sync_runs ORDER BY id DESC LIMIT 1").fetchone()
+        conn.close()
+        if row:
+            last = datetime.fromisoformat(row["started_at"])
+    except Exception:
+        log.exception("Backup-Proxy-Sync: letzter Lauf nicht lesbar")
+    if last:
+        elapsed = (datetime.now(timezone.utc) - last).total_seconds()
+        delay = max(10, interval - elapsed)
+
+    while True:
+        with _backup_sync_state_lock:
+            _backup_sync_state["next_run_at"] = (
+                datetime.now(timezone.utc) + timedelta(seconds=delay)
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        woke = _backup_sync_wake.wait(timeout=delay)
+        with _backup_sync_state_lock:
+            trigger = (_backup_sync_state["pending_trigger"] or "manual") if woke else "schedule"
+            # running schon hier (atomar mit dem Loeschen des Wake-Signals) setzen,
+            # sonst koennte /api/backup-sync/run dazwischen einen zweiten Lauf einreihen.
+            _backup_sync_state.update(pending_trigger=None, next_run_at=None, running=True)
+            _backup_sync_wake.clear()
+        try:
+            run_backup_sync(trigger)
+        except Exception:
+            log.exception("Backup-Proxy-Sync: unerwarteter Fehler im Scheduler")
+            with _backup_sync_state_lock:
+                _backup_sync_state.update(running=False, run_id=None)
+        delay = interval
 
 
 # ---------------------------------------------------------------------------
@@ -1942,6 +2342,103 @@ def api_crowdsec_whitelist_apply():
     return jsonify(ok=True)
 
 
+@app.route("/backup-sync")
+def backup_sync_page():
+    return render_template("backup_sync.html")
+
+
+def _backup_sync_run_dict(r, with_output=False):
+    d = {
+        "id": r["id"],
+        "triggered_by": r["triggered_by"],
+        "started_at": r["started_at"],
+        "finished_at": r["finished_at"],
+        "status": r["status"],
+        "message": r["message"],
+        "synced_domains": json.loads(r["synced_domains"]) if r["synced_domains"] else [],
+        "skipped_domains": json.loads(r["skipped_domains"]) if r["skipped_domains"] else [],
+    }
+    if with_output:
+        d["output"] = r["output"] or ""
+    return d
+
+
+@app.route("/api/backup-sync/status")
+def api_backup_sync_status():
+    limit = min(int(request.args.get("runs", "50")), 500)
+    conn = get_conn()
+    domains = [dict(r) for r in conn.execute(
+        """
+        SELECT domain, service_id, sync_enabled, in_netbird, target, first_seen_at,
+               last_seen_at, last_synced_at, last_status, last_message
+        FROM backup_sync_domains
+        ORDER BY in_netbird DESC, domain ASC
+        """
+    )]
+    runs = [_backup_sync_run_dict(r) for r in conn.execute(
+        "SELECT * FROM backup_sync_runs ORDER BY id DESC LIMIT ?", (limit,)
+    )]
+    conn.close()
+    for d in domains:
+        d["sync_enabled"] = bool(d["sync_enabled"])
+        d["in_netbird"] = bool(d["in_netbird"])
+    with _backup_sync_state_lock:
+        state = dict(_backup_sync_state)
+    return jsonify(
+        configured=BACKUP_SYNC_CONFIGURED,
+        target=f"{BACKUP_SYNC_USER}@{BACKUP_SYNC_HOST}:{BACKUP_SYNC_DEST}" if BACKUP_SYNC_HOST else None,
+        interval_minutes=BACKUP_SYNC_INTERVAL_MINUTES,
+        running=state["running"],
+        queued=_backup_sync_wake.is_set(),
+        next_run_at=state["next_run_at"],
+        domains=domains,
+        runs=runs,
+    )
+
+
+@app.route("/api/backup-sync/runs/<int:run_id>")
+def api_backup_sync_run(run_id):
+    conn = get_conn()
+    r = conn.execute("SELECT * FROM backup_sync_runs WHERE id = ?", (run_id,)).fetchone()
+    conn.close()
+    if not r:
+        return jsonify(error="Lauf nicht gefunden"), 404
+    return jsonify(_backup_sync_run_dict(r, with_output=True))
+
+
+@app.route("/api/backup-sync/run", methods=["POST"])
+def api_backup_sync_trigger():
+    """Stoesst einen sofortigen Sync an. Laeuft asynchron im Scheduler-Thread -
+    das Frontend pollt /api/backup-sync/status, bis running wieder false ist."""
+    if not BACKUP_SYNC_CONFIGURED:
+        return jsonify(error="Backup-Proxy-Sync ist nicht konfiguriert (BACKUP_SYNC_HOST)"), 400
+    with _backup_sync_state_lock:
+        if _backup_sync_state["running"] or _backup_sync_wake.is_set():
+            return jsonify(error="Es laeuft bereits ein Sync"), 409
+        _backup_sync_state["pending_trigger"] = "manual"
+        _backup_sync_wake.set()
+    return jsonify(ok=True), 202
+
+
+@app.route("/api/backup-sync/domains/<domain>", methods=["PUT"])
+def api_backup_sync_domain_update(domain):
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body.get("sync_enabled"), bool):
+        return jsonify(error="sync_enabled (true/false) fehlt"), 400
+    domain = domain.strip().lower()
+    with _db_lock:
+        conn = get_conn()
+        cur = conn.execute(
+            "UPDATE backup_sync_domains SET sync_enabled = ? WHERE domain = ?",
+            (1 if body["sync_enabled"] else 0, domain),
+        )
+        conn.commit()
+        conn.close()
+    if not cur.rowcount:
+        return jsonify(error=f"Domain '{domain}' unbekannt"), 404
+    return jsonify(ok=True, domain=domain, sync_enabled=body["sync_enabled"])
+
+
 @app.route("/api/poller-status")
 def api_poller_status():
     conn = get_conn()
@@ -1989,4 +2486,6 @@ if __name__ == "__main__":
     ensure_asn_db()
     threading.Thread(target=poller_loop, daemon=True).start()
     threading.Thread(target=backfill_asn_data, daemon=True).start()
+    if BACKUP_SYNC_CONFIGURED:
+        threading.Thread(target=backup_sync_loop, daemon=True).start()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8098")))

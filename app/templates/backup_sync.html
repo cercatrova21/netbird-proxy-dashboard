@@ -1,0 +1,451 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Backup-Sync · NetBird Proxy Dashboard</title>
+<link rel="manifest" href="{{ url_for('manifest') }}">
+<meta name="theme-color" content="#0d1117">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="icon" href="{{ url_for('static', filename='icon-192.png') }}" sizes="192x192">
+<link rel="apple-touch-icon" href="{{ url_for('static', filename='icon-192.png') }}">
+<style>
+  :root{
+    --bg: #0d1117;
+    --panel: #141b24;
+    --panel-2: #0f151d;
+    --border: #223041;
+    --text: #dbe4ee;
+    --muted: #7d8ba0;
+    --accent-ok: #3ddc97;
+    --accent-deny: #ff6b5e;
+    --accent-info: #5b9dff;
+    --accent-amber: #f2b84b;
+    --mono: "JetBrains Mono", "SFMono-Regular", Consolas, Menlo, monospace;
+    --sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  *{ box-sizing: border-box; }
+  body{ margin:0; background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 14px; }
+  header.top{
+    display:flex; align-items:center; justify-content:space-between; gap:12px;
+    padding: calc(14px + env(safe-area-inset-top)) 22px 14px 22px;
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, #121924, #0d1117);
+  }
+  .brand{ display:flex; align-items:center; gap:10px; }
+  .brand .dot{ width:9px; height:9px; border-radius:50%; background: var(--accent-ok); box-shadow: 0 0 8px var(--accent-ok); }
+  .brand h1{ font-size:15px; margin:0; letter-spacing:.02em; font-weight:600; }
+  .brand span.sub{ color: var(--muted); font-family: var(--mono); font-size:12px; }
+  .back-link{
+    color: var(--muted); font-family: var(--mono); font-size:12px; text-decoration:none;
+    border:1px solid var(--border); border-radius:6px; padding:4px 10px; white-space:nowrap;
+  }
+  .back-link:hover{ color: var(--accent-info); border-color: var(--accent-info); }
+
+  main{ padding: 20px; max-width: 1100px; margin: 0 auto; }
+  .card{ background: var(--panel); border:1px solid var(--border); border-radius:10px; padding:20px; margin-bottom:16px; }
+  .card h2{ font-size:12px; text-transform:uppercase; letter-spacing:.08em; color: var(--muted); margin:0 0 12px 0; font-weight:600; }
+  .card-head{ display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:12px; }
+  .card-head h2{ margin:0; }
+  .hint{ color: var(--muted); font-size:12.5px; line-height:1.55; margin:0; }
+  .hint code{ color: var(--text); background: var(--panel-2); border-radius:4px; padding:1px 5px; font-family: var(--mono); }
+
+  .status-grid{ display:grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap:12px; margin-bottom:16px; }
+  .stat{ background: var(--panel-2); border:1px solid var(--border); border-radius:8px; padding:10px 12px; min-width:0; }
+  .stat .k{ font-family: var(--mono); font-size:10.5px; color: var(--muted); text-transform:uppercase; letter-spacing:.05em; }
+  .stat .v{ font-size:14px; margin-top:4px; overflow-wrap:anywhere; }
+  .stat .v small{ color: var(--muted); font-size:11.5px; display:block; margin-top:2px; }
+
+  .btn{
+    background: rgba(91,157,255,.12); border:1px solid var(--accent-info); color: var(--accent-info);
+    border-radius:8px; padding:8px 18px; font-family: var(--mono); font-size:13px; cursor:pointer;
+  }
+  .btn:hover{ background: rgba(91,157,255,.2); }
+  .btn:disabled{ opacity:.5; cursor:default; }
+  .actions{ display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  #action-status{ font-family: var(--mono); font-size:12px; }
+  #action-status.ok{ color: var(--accent-ok); }
+  #action-status.error{ color: var(--accent-deny); }
+  #action-status.info{ color: var(--accent-amber); }
+
+  .pill{ display:inline-block; font-family: var(--mono); font-size:11px; border-radius:999px; padding:2px 8px; border:1px solid; white-space:nowrap; }
+  .pill.ok{ color: var(--accent-ok); border-color: rgba(61,220,151,.5); background: rgba(61,220,151,.08); }
+  .pill.error{ color: var(--accent-deny); border-color: rgba(255,107,94,.5); background: rgba(255,107,94,.08); }
+  .pill.warn{ color: var(--accent-amber); border-color: rgba(242,184,75,.5); background: rgba(242,184,75,.08); }
+  .pill.muted{ color: var(--muted); border-color: var(--border); }
+  .pill.running{ color: var(--accent-info); border-color: rgba(91,157,255,.5); background: rgba(91,157,255,.08); }
+
+  .toolbar{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  input[type=search]{
+    background: var(--panel-2); border:1px solid var(--border); color: var(--text);
+    border-radius:8px; padding:7px 10px; font-family: var(--mono); font-size:12.5px; width: 220px; max-width:100%;
+  }
+  input[type=search]:focus{ outline:none; border-color: var(--accent-info); }
+  .count{ color: var(--muted); font-family: var(--mono); font-size:12px; }
+
+  .table-wrap{ overflow-x:auto; }
+  table{ width:100%; border-collapse: collapse; font-size:13px; }
+  th{ text-align:left; font-family: var(--mono); font-size:10.5px; color: var(--muted); text-transform:uppercase; letter-spacing:.05em; font-weight:500; padding:8px 10px; border-bottom:1px solid var(--border); white-space:nowrap; }
+  td{ padding:8px 10px; border-bottom:1px solid rgba(34,48,65,.6); vertical-align:middle; }
+  td.mono{ font-family: var(--mono); font-size:12px; }
+  td.muted, span.muted{ color: var(--muted); }
+  tr.inactive td{ opacity:.55; }
+  tr.excluded td.domain{ color: var(--muted); }
+  tr.clickable{ cursor:pointer; }
+  tr.clickable:hover td{ background: rgba(91,157,255,.05); }
+  tr.detail td{ background: var(--panel-2); padding:12px 14px; }
+  .detail h3{ font-size:11px; color: var(--muted); font-family: var(--mono); text-transform:uppercase; letter-spacing:.05em; margin:0 0 6px 0; font-weight:500; }
+  .detail .domain-list{ display:flex; flex-wrap:wrap; gap:6px; margin-bottom:12px; }
+  .detail pre{ margin:0; max-height:320px; overflow:auto; font-family: var(--mono); font-size:11.5px; color: var(--muted); white-space:pre-wrap; word-break:break-all; }
+
+  /* Toggle-Schalter */
+  .switch{ position:relative; display:inline-block; width:36px; height:20px; flex-shrink:0; }
+  .switch input{ opacity:0; width:0; height:0; }
+  .switch .slider{ position:absolute; inset:0; background: var(--panel-2); border:1px solid var(--border); border-radius:999px; cursor:pointer; transition: .15s; }
+  .switch .slider::before{ content:""; position:absolute; width:14px; height:14px; left:2px; top:2px; border-radius:50%; background: var(--muted); transition: .15s; }
+  .switch input:checked + .slider{ background: rgba(61,220,151,.18); border-color: var(--accent-ok); }
+  .switch input:checked + .slider::before{ transform: translateX(16px); background: var(--accent-ok); }
+  .switch input:disabled + .slider{ opacity:.5; cursor:default; }
+  .switch input:focus-visible + .slider{ outline: 2px solid var(--accent-info); outline-offset:2px; }
+
+  .banner{ border:1px solid rgba(242,184,75,.5); background: rgba(242,184,75,.08); color: var(--accent-amber); border-radius:8px; padding:10px 14px; font-size:13px; margin-bottom:16px; display:none; }
+  .banner.show{ display:block; }
+
+  @media (max-width: 640px){
+    header.top{ padding-left:16px; padding-right:16px; }
+    main{ padding:16px; }
+    .card{ padding:16px; }
+    .hide-sm{ display:none; }
+  }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="brand">
+    <div class="dot"></div>
+    <div>
+      <h1>Backup-Proxy-Sync</h1>
+      <span class="sub" id="target-sub">NetBird → Backup-Proxy</span>
+    </div>
+  </div>
+  <a class="back-link" href="/">← Zurück zum Dashboard</a>
+</header>
+
+<main>
+  <div class="banner" id="not-configured">
+    Backup-Proxy-Sync ist nicht konfiguriert. <code>BACKUP_SYNC_HOST</code> in der <code>.env</code> setzen und den Container neu starten.
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2>Status</h2>
+      <div class="actions">
+        <span id="action-status"></span>
+        <button type="button" class="btn" id="run-btn">⇅ Jetzt synchronisieren</button>
+      </div>
+    </div>
+    <div class="status-grid">
+      <div class="stat"><div class="k">Letzter Lauf</div><div class="v" id="s-last">–</div></div>
+      <div class="stat"><div class="k">Ergebnis</div><div class="v" id="s-result">–</div></div>
+      <div class="stat"><div class="k">Nächster Lauf</div><div class="v" id="s-next">–</div></div>
+      <div class="stat"><div class="k">Ziel</div><div class="v mono" id="s-target" style="font-family:var(--mono);font-size:12px">–</div></div>
+    </div>
+    <p class="hint">
+      Synchronisiert alle aktiven NetBird-Reverse-Proxy-Services (Domain, Backend-Ziel, Zertifikat) auf den Backup-Proxy
+      und erzeugt dort die nginx-Konfiguration neu. Eine vom Sync ausgeschlossene Domain wird beim nächsten Lauf
+      <b>vom Backup-Proxy entfernt</b>. Neue Domains aus NetBird werden standardmässig synchronisiert.
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2>Webseiten</h2>
+      <div class="toolbar">
+        <span class="count" id="domain-count"></span>
+        <input type="search" id="domain-search" placeholder="Domain filtern…" autocomplete="off">
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:60px">Sync</th>
+            <th>Domain</th>
+            <th class="hide-sm">Backend</th>
+            <th>Zuletzt synchronisiert</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="domains-body"><tr><td colspan="5" class="muted">lade…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2>Verlauf</h2>
+      <span class="count">Klick auf einen Lauf zeigt Details &amp; Log</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Zeitpunkt</th>
+            <th>Auslöser</th>
+            <th class="hide-sm">Dauer</th>
+            <th>Ergebnis</th>
+            <th>Meldung</th>
+          </tr>
+        </thead>
+        <tbody id="runs-body"><tr><td colspan="5" class="muted">lade…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<script>
+const STATUS_LABELS = {
+  ok:             ["ok", "Synchronisiert"],
+  excluded:       ["muted", "Ausgeschlossen"],
+  no_cert:        ["warn", "Kein Zertifikat"],
+  invalid:        ["warn", "Ungültig"],
+  error:          ["error", "Fehler"],
+  not_in_netbird: ["muted", "Nicht in NetBird"],
+};
+
+let state = null;
+let openRunId = null;
+let pollTimer = null;
+const runDetails = {};
+
+function esc(s){
+  return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+function fmtTime(iso){
+  if(!iso) return "–";
+  const d = new Date(iso);
+  return d.toLocaleString("de-CH", {day:"2-digit", month:"2-digit", year:"numeric", hour:"2-digit", minute:"2-digit", second:"2-digit"});
+}
+
+function fmtRelative(iso){
+  if(!iso) return "";
+  const diff = (Date.now() - new Date(iso).getTime()) / 1000;
+  const abs = Math.abs(diff);
+  let txt;
+  if(abs < 60) txt = `${Math.round(abs)} s`;
+  else if(abs < 3600) txt = `${Math.round(abs/60)} Min.`;
+  else if(abs < 86400) txt = `${Math.round(abs/3600)} Std.`;
+  else txt = `${Math.round(abs/86400)} Tg.`;
+  return diff >= 0 ? `vor ${txt}` : `in ${txt}`;
+}
+
+function fmtDuration(run){
+  if(!run.finished_at) return "–";
+  const s = (new Date(run.finished_at) - new Date(run.started_at)) / 1000;
+  return s < 60 ? `${Math.round(s)} s` : `${Math.floor(s/60)} Min. ${Math.round(s%60)} s`;
+}
+
+function statusPill(code, title){
+  const [cls, label] = STATUS_LABELS[code] || ["muted", code || "–"];
+  return `<span class="pill ${cls}"${title ? ` title="${esc(title)}"` : ""}>${esc(label)}</span>`;
+}
+
+function runPill(run){
+  if(run.status === "running") return `<span class="pill running">Läuft…</span>`;
+  return run.status === "ok" ? `<span class="pill ok">OK</span>` : `<span class="pill error">Fehler</span>`;
+}
+
+function setActionStatus(text, cls){
+  const el = document.getElementById("action-status");
+  el.textContent = text;
+  el.className = cls || "";
+}
+
+function renderStatus(){
+  document.getElementById("not-configured").classList.toggle("show", !state.configured);
+  document.getElementById("s-target").textContent = state.target || "nicht konfiguriert";
+  if(state.target) document.getElementById("target-sub").textContent = `NetBird → ${state.target.split(":")[0]}`;
+
+  const last = state.runs.find(r => r.status !== "running");
+  document.getElementById("s-last").innerHTML = last
+    ? `${esc(fmtTime(last.started_at))}<small>${esc(fmtRelative(last.started_at))} · ${last.triggered_by === "manual" ? "manuell" : "Zeitplan"}</small>`
+    : "noch nie";
+  document.getElementById("s-result").innerHTML = last
+    ? `${runPill(last)}<small>${esc(last.message || "")}</small>`
+    : "–";
+
+  const btn = document.getElementById("run-btn");
+  const busy = state.running || state.queued;
+  btn.disabled = !state.configured || busy;
+  if(busy){
+    document.getElementById("s-next").innerHTML = `<span class="pill running">Läuft gerade…</span>`;
+  }else{
+    document.getElementById("s-next").innerHTML = state.next_run_at
+      ? `${esc(fmtTime(state.next_run_at))}<small>${esc(fmtRelative(state.next_run_at))} · alle ${state.interval_minutes} Min.</small>`
+      : (state.configured ? "–" : "deaktiviert");
+  }
+}
+
+function renderDomains(){
+  const q = document.getElementById("domain-search").value.trim().toLowerCase();
+  const body = document.getElementById("domains-body");
+  const active = state.domains.filter(d => d.in_netbird);
+  const enabledCount = active.filter(d => d.sync_enabled).length;
+  document.getElementById("domain-count").textContent = `${enabledCount} von ${active.length} werden synchronisiert`;
+
+  const rows = state.domains.filter(d => !q || d.domain.includes(q) || (d.target || "").toLowerCase().includes(q));
+  if(!state.domains.length){
+    body.innerHTML = `<tr><td colspan="5" class="muted">Noch keine Domains bekannt – sie erscheinen nach dem ersten Sync-Lauf.</td></tr>`;
+    return;
+  }
+  if(!rows.length){
+    body.innerHTML = `<tr><td colspan="5" class="muted">Keine Treffer</td></tr>`;
+    return;
+  }
+  body.innerHTML = rows.map(d => {
+    const cls = [!d.in_netbird ? "inactive" : "", !d.sync_enabled ? "excluded" : ""].join(" ");
+    let status = d.last_status;
+    // Schalter wurde seit dem letzten Lauf umgelegt -> Hinweis statt veraltetem Status
+    let pending = "";
+    if(d.in_netbird && !d.sync_enabled && d.last_status !== "excluded"){
+      pending = ` <span class="pill warn" title="Wird beim nächsten Lauf vom Backup-Proxy entfernt">wird entfernt</span>`;
+    }else if(d.in_netbird && d.sync_enabled && d.last_status === "excluded"){
+      pending = ` <span class="pill warn" title="Wird beim nächsten Lauf synchronisiert">ausstehend</span>`;
+    }
+    return `<tr class="${cls}">
+      <td><label class="switch" title="${d.sync_enabled ? "Wird synchronisiert – klicken zum Ausschliessen" : "Ausgeschlossen – klicken zum Synchronisieren"}">
+        <input type="checkbox" data-domain="${esc(d.domain)}" ${d.sync_enabled ? "checked" : ""} aria-label="${esc(d.domain)} synchronisieren">
+        <span class="slider"></span></label></td>
+      <td class="mono domain">${esc(d.domain)}</td>
+      <td class="mono muted hide-sm">${esc(d.target || "–")}</td>
+      <td>${d.last_synced_at ? `${esc(fmtTime(d.last_synced_at))}<br><span class="muted" style="font-size:11.5px">${esc(fmtRelative(d.last_synced_at))}</span>` : `<span class="muted">nie</span>`}</td>
+      <td>${statusPill(status, d.last_message)}${pending}</td>
+    </tr>`;
+  }).join("");
+}
+
+function renderRunDetail(run){
+  const d = runDetails[run.id];
+  const synced = run.synced_domains.length
+    ? run.synced_domains.map(x => `<span class="pill ok">${esc(x)}</span>`).join("")
+    : `<span class="muted">keine</span>`;
+  const skipped = run.skipped_domains.length
+    ? run.skipped_domains.map(x => `<span class="pill ${(STATUS_LABELS[x.reason]||["muted"])[0]}" title="${esc(x.message)}">${esc(x.domain)}</span>`).join("")
+    : `<span class="muted">keine</span>`;
+  return `<tr class="detail"><td colspan="5"><div class="detail">
+    <h3>Synchronisiert (${run.synced_domains.length})</h3><div class="domain-list">${synced}</div>
+    <h3>Übersprungen (${run.skipped_domains.length})</h3><div class="domain-list">${skipped}</div>
+    <h3>Log</h3><pre>${d ? esc(d.output || "(leer)") : "lade…"}</pre>
+  </div></td></tr>`;
+}
+
+function renderRuns(){
+  const body = document.getElementById("runs-body");
+  if(!state.runs.length){
+    body.innerHTML = `<tr><td colspan="5" class="muted">Noch keine Läufe.</td></tr>`;
+    return;
+  }
+  body.innerHTML = state.runs.map(r => {
+    const row = `<tr class="clickable" data-run="${r.id}">
+      <td>${esc(fmtTime(r.started_at))}</td>
+      <td>${r.triggered_by === "manual" ? "manuell" : "Zeitplan"}</td>
+      <td class="hide-sm">${esc(fmtDuration(r))}</td>
+      <td>${runPill(r)}</td>
+      <td class="muted">${esc(r.message || "")}</td>
+    </tr>`;
+    return r.id === openRunId ? row + renderRunDetail(r) : row;
+  }).join("");
+}
+
+async function loadStatus(){
+  try{
+    const res = await fetch("/api/backup-sync/status");
+    state = await res.json();
+    renderStatus();
+    renderDomains();
+    renderRuns();
+  }catch(e){
+    setActionStatus("Status konnte nicht geladen werden: " + e.message, "error");
+  }
+  schedulePoll();
+}
+
+function schedulePoll(){
+  clearTimeout(pollTimer);
+  const busy = state && (state.running || state.queued);
+  pollTimer = setTimeout(async () => {
+    const wasBusy = busy;
+    await loadStatus();
+    if(wasBusy && !(state.running || state.queued)){
+      const last = state.runs[0];
+      if(last) setActionStatus(last.status === "ok" ? "Sync abgeschlossen." : "Sync fehlgeschlagen – siehe Verlauf.", last.status === "ok" ? "ok" : "error");
+    }
+  }, busy ? 2000 : 30000);
+}
+
+document.getElementById("run-btn").addEventListener("click", async () => {
+  const btn = document.getElementById("run-btn");
+  btn.disabled = true;
+  setActionStatus("Sync wird gestartet…", "info");
+  try{
+    const res = await fetch("/api/backup-sync/run", {method: "POST"});
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.error || "Unbekannter Fehler");
+    setActionStatus("Sync läuft…", "info");
+  }catch(e){
+    setActionStatus("Fehler: " + e.message, "error");
+  }
+  await loadStatus();
+});
+
+document.getElementById("domains-body").addEventListener("change", async (ev) => {
+  const input = ev.target.closest("input[data-domain]");
+  if(!input) return;
+  const domain = input.dataset.domain;
+  const enabled = input.checked;
+  input.disabled = true;
+  try{
+    const res = await fetch(`/api/backup-sync/domains/${encodeURIComponent(domain)}`, {
+      method: "PUT",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({sync_enabled: enabled}),
+    });
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.error || "Unbekannter Fehler");
+    const d = state.domains.find(x => x.domain === domain);
+    if(d) d.sync_enabled = enabled;
+    setActionStatus(`${domain}: ${enabled ? "wird synchronisiert" : "ausgeschlossen"} – wirkt beim nächsten Sync.`, "ok");
+    renderDomains();
+  }catch(e){
+    input.checked = !enabled;
+    input.disabled = false;
+    setActionStatus("Fehler: " + e.message, "error");
+  }
+});
+
+document.getElementById("domain-search").addEventListener("input", () => state && renderDomains());
+
+document.getElementById("runs-body").addEventListener("click", async (ev) => {
+  const tr = ev.target.closest("tr[data-run]");
+  if(!tr) return;
+  const id = Number(tr.dataset.run);
+  openRunId = openRunId === id ? null : id;
+  renderRuns();
+  if(openRunId !== null && !runDetails[id]){
+    try{
+      const res = await fetch(`/api/backup-sync/runs/${id}`);
+      runDetails[id] = await res.json();
+    }catch(e){
+      runDetails[id] = {output: "Log konnte nicht geladen werden: " + e.message};
+    }
+    renderRuns();
+    if(runDetails[id].status === "running") delete runDetails[id];  // noch nicht fertig -> beim naechsten Oeffnen neu laden
+  }
+});
+
+loadStatus();
+</script>
+</body>
+</html>
