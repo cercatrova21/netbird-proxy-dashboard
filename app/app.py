@@ -2911,8 +2911,37 @@ def api_poller_status():
     )
 
 
+def _backup_sync_lookup():
+    """{domain: {enabled, status, last_synced_at}} fuer die Domain-Uebersicht."""
+    if not BACKUP_SYNC_CONFIGURED:
+        return {}
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT domain, sync_enabled, last_status, last_synced_at FROM backup_sync_domains"
+    ).fetchall()
+    conn.close()
+    return {
+        r["domain"].lower(): {
+            "enabled": bool(r["sync_enabled"]),
+            "status": r["last_status"],
+            "last_synced_at": r["last_synced_at"],
+        }
+        for r in rows
+    }
+
+
 if __name__ == "__main__":
     init_db()
+    import domains
+
+    domains.register(
+        app,
+        get_conn=get_conn,
+        nb_base=NB_API_BASE,
+        nb_token=NB_API_TOKEN,
+        docker_client=docker_sdk.from_env,
+        backup_sync_lookup=_backup_sync_lookup,
+    )
     ensure_asn_db()
     ensure_city_db()
     threading.Thread(target=poller_loop, daemon=True).start()

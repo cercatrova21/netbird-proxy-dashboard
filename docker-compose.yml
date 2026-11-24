@@ -27,6 +27,12 @@ services:
       BACKUP_SYNC_INTERVAL_MINUTES: ${BACKUP_SYNC_INTERVAL_MINUTES:-15}
       BUNKERWEB_CONTAINER_NAME: ${BUNKERWEB_CONTAINER_NAME:-}
       BUNKERWEB_PROXY_IP: ${BUNKERWEB_PROXY_IP:-}
+      # Domain-Verwaltung (Seite /domains): BunkerWeb-Compose-Verzeichnis (gleicher
+      # Pfad wie auf dem Host, damit docker-compose es identisch ausfuehrt) und die
+      # Traefik-File-Provider-Datei. Leer = Seite nur lesend.
+      BW_COMPOSE_DIR: ${BW_COMPOSE_DIR:-}
+      TRAEFIK_DYNAMIC_PATH: ${BW_COMPOSE_DIR:+/traefik/dynamic.yaml}
+      DOMAINS_PROBE_HOST: ${DOMAINS_PROBE_HOST:-}
       TZ: ${TZ:-Europe/Zurich}
     volumes:
       - ./data:/data
@@ -42,6 +48,13 @@ services:
       # rsync/ssh auf den Backup-Proxy. Ohne BACKUP_SYNC_HOST bleibt beides ungenutzt.
       - ${BACKUP_SYNC_HOST_CERT_DIR:-/var/lib/docker/volumes/root_netbird_proxy_certs/_data}:/backup-sync/certs:ro
       - ${BACKUP_SYNC_HOST_SSH_KEY:-/root/.ssh/backup-proxy-sync}:/backup-sync/ssh_key:ro
+      # Domain-Verwaltung: BunkerWeb-Compose (Sites-Datei schreiben, bw-scheduler per
+      # docker-compose neu erstellen), Traefik-Datei (Router pro Domain, wird in place
+      # geschrieben) und das docker-compose-Binary des Hosts (statisch gelinkt, gleiche
+      # Version wie auf dem Host -> identische Config-Hashes).
+      - ${BW_COMPOSE_DIR:-/nonexistent-bunkerweb}:${BW_COMPOSE_DIR:-/nonexistent-bunkerweb}
+      - ${TRAEFIK_DYNAMIC_HOST_PATH:-/opt/netbird/traefik-dynamic.yaml}:/traefik/dynamic.yaml
+      - ${DOCKER_COMPOSE_HOST_BIN:-/usr/libexec/docker/cli-plugins/docker-compose}:/usr/local/bin/docker-compose:ro
     ports:
       # Bindet den Port NUR an deine eigene NetBird-Interface-IP.
       # Dadurch ist das Dashboard ausschliesslich ueber das NetBird-Mesh erreichbar

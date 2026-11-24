@@ -1,0 +1,1029 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Domains · NetBird Proxy Dashboard</title>
+<link rel="manifest" href="{{ url_for('manifest') }}">
+<meta name="theme-color" content="#0d1117">
+<link rel="icon" href="{{ url_for('static', filename='icon-192.png') }}" sizes="192x192">
+<link rel="apple-touch-icon" href="{{ url_for('static', filename='icon-192.png') }}">
+<style>
+  :root{
+    --bg:#0d1117; --panel:#141b24; --panel-2:#0f151d; --panel-3:#18212d; --border:#223041;
+    --text:#dbe4ee; --muted:#7d8ba0;
+    --ok:#3ddc97; --deny:#ff6b5e; --info:#5b9dff; --amber:#f2b84b; --violet:#b48cff;
+    --c-traefik:#5b9dff; --c-bw:#3ddc97; --c-nb:#f2b84b; --c-backend:#b48cff;
+    --mono:"JetBrains Mono","SFMono-Regular",Consolas,Menlo,monospace;
+    --sans:"Inter",system-ui,-apple-system,"Segoe UI",sans-serif;
+  }
+  *{ box-sizing:border-box; }
+  body{ margin:0; background:var(--bg); color:var(--text); font-family:var(--sans); font-size:14px; }
+  a{ color:var(--info); }
+  header.top{
+    display:flex; align-items:center; justify-content:space-between; gap:12px;
+    padding:calc(14px + env(safe-area-inset-top)) 22px 14px 22px;
+    border-bottom:1px solid var(--border); background:linear-gradient(180deg,#121924,#0d1117);
+  }
+  .brand{ display:flex; align-items:center; gap:10px; }
+  .brand .dot{ width:9px; height:9px; border-radius:50%; background:var(--ok); box-shadow:0 0 8px var(--ok); }
+  .brand h1{ font-size:15px; margin:0; letter-spacing:.02em; font-weight:600; }
+  .brand span.sub{ color:var(--muted); font-family:var(--mono); font-size:12px; }
+  .back-link{ color:var(--muted); font-family:var(--mono); font-size:12px; text-decoration:none; border:1px solid var(--border); border-radius:6px; padding:4px 10px; white-space:nowrap; }
+  .back-link:hover{ color:var(--info); border-color:var(--info); }
+  main{ padding:20px; max-width:1480px; margin:0 auto; }
+  .card{ background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:18px; margin-bottom:16px; }
+  .card h2{ font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin:0 0 12px 0; font-weight:600; }
+  .hint{ color:var(--muted); font-size:12.5px; line-height:1.55; margin:0; }
+  .hint code, code{ color:var(--text); background:var(--panel-2); border-radius:4px; padding:1px 5px; font-family:var(--mono); font-size:12px; }
+
+  /* Kennzahlen */
+  .tiles{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-bottom:16px; }
+  .tile{ background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:12px 14px; cursor:pointer; transition:border-color .15s; }
+  .tile:hover, .tile.active{ border-color:var(--info); }
+  .tile .k{ font-family:var(--mono); font-size:10.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; }
+  .tile .v{ font-size:24px; font-weight:600; margin-top:4px; }
+  .tile .v small{ font-size:12px; color:var(--muted); font-weight:400; margin-left:4px; }
+  .tile.bw .v{ color:var(--c-bw); } .tile.pt .v{ color:var(--c-traefik); } .tile.iss .v{ color:var(--amber); } .tile.err .v{ color:var(--deny); }
+
+  /* Toolbar */
+  .toolbar{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
+  .toolbar .grow{ flex:1; }
+  input, select, textarea{
+    background:var(--panel-2); border:1px solid var(--border); color:var(--text);
+    border-radius:8px; padding:7px 10px; font-family:var(--mono); font-size:12.5px; max-width:100%;
+  }
+  input:focus, select:focus, textarea:focus{ outline:none; border-color:var(--info); }
+  input[type=search]{ width:240px; }
+  input:disabled, select:disabled, textarea:disabled{ opacity:.6; }
+  .btn{ background:rgba(91,157,255,.12); border:1px solid var(--info); color:var(--info); border-radius:8px; padding:7px 14px; font-family:var(--mono); font-size:12.5px; cursor:pointer; white-space:nowrap; }
+  .btn:hover{ background:rgba(91,157,255,.2); }
+  .btn:disabled{ opacity:.45; cursor:default; }
+  .btn.primary{ background:var(--info); color:#06101f; font-weight:600; }
+  .btn.primary:hover{ background:#7cb1ff; }
+  .btn.danger{ background:rgba(255,107,94,.1); border-color:var(--deny); color:var(--deny); }
+  .btn.danger.primary{ background:var(--deny); color:#1d0503; }
+  .btn.ghost{ background:transparent; border-color:var(--border); color:var(--muted); }
+  .btn.ghost:hover{ color:var(--text); border-color:var(--muted); }
+  .btn.sm{ padding:4px 9px; font-size:11.5px; }
+  .chips{ display:flex; gap:6px; flex-wrap:wrap; }
+  .chip{ font-family:var(--mono); font-size:11.5px; border:1px solid var(--border); color:var(--muted); background:transparent; border-radius:999px; padding:4px 11px; cursor:pointer; }
+  .chip.active{ color:var(--text); border-color:var(--info); background:rgba(91,157,255,.12); }
+
+  /* Fluss-Tabelle */
+  .flow-head, .flow-row{
+    display:grid; grid-template-columns: 16px minmax(190px,1.25fr) 128px 176px 150px minmax(170px,1fr) 128px 74px;
+    align-items:center; column-gap:0;
+  }
+  .flow-head{ padding:0 12px 8px 12px; font-family:var(--mono); font-size:10.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }
+  .flow-head > div{ padding:0 6px; }
+  .flow-head .lg{ display:flex; align-items:center; gap:6px; }
+  .flow-head .sw{ width:9px; height:9px; border-radius:2px; display:inline-block; }
+  .group-title{ font-family:var(--mono); font-size:11px; color:var(--muted); padding:14px 12px 6px; letter-spacing:.04em; }
+  .flow-row{ padding:7px 12px; border-top:1px solid rgba(34,48,65,.6); cursor:pointer; position:relative; }
+  .flow-row:hover{ background:rgba(91,157,255,.045); }
+  .flow-row.sel{ background:rgba(91,157,255,.09); }
+  .flow-row.disabled .dom, .flow-row.disabled .node{ opacity:.5; }
+  .status-dot{ width:9px; height:9px; border-radius:50%; background:var(--ok); }
+  .status-dot.warn{ background:var(--amber); } .status-dot.error{ background:var(--deny); box-shadow:0 0 6px var(--deny); } .status-dot.off{ background:var(--muted); }
+  .dom{ min-width:0; padding-right:10px; }
+  .dom .name{ font-weight:600; font-size:13.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .dom .badges{ display:flex; gap:4px; flex-wrap:wrap; margin-top:3px; }
+  .badge{ font-family:var(--mono); font-size:10px; border-radius:4px; padding:1px 5px; border:1px solid var(--border); color:var(--muted); white-space:nowrap; }
+  .badge.sso{ color:var(--info); border-color:rgba(91,157,255,.45); }
+  .badge.pw{ color:var(--amber); border-color:rgba(242,184,75,.45); }
+  .badge.geo{ color:var(--violet); border-color:rgba(180,140,255,.4); }
+  .badge.cs{ color:var(--ok); border-color:rgba(61,220,151,.35); }
+  .badge.bad{ color:var(--deny); border-color:rgba(255,107,94,.45); }
+  /* Knoten + Verbindungslinien */
+  .cell{ position:relative; height:44px; display:flex; align-items:center; padding:0 6px; }
+  .cell::before{ content:""; position:absolute; left:0; right:0; top:50%; border-top:2px solid #2a3a4e; z-index:0; }
+  .cell.first::before{ left:50%; }
+  .cell.last::before{ right:50%; }
+  .cell.skip::before{ border-top-style:dashed; border-color:#2d3d52; }
+  .cell.none::before{ display:none; }
+  .node{ position:relative; z-index:1; width:100%; border-radius:8px; padding:5px 8px; font-family:var(--mono); font-size:11px; line-height:1.3;
+         border:1px solid; background:var(--panel-2); min-width:0; }
+  .node .t{ font-weight:600; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .node .s{ color:var(--muted); font-size:10px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .node.traefik{ border-color:rgba(91,157,255,.55); } .node.traefik .t{ color:var(--c-traefik); }
+  .node.pass{ border-color:var(--border); border-style:dashed; } .node.pass .t{ color:var(--muted); }
+  .node.bw{ border-color:rgba(61,220,151,.6); background:rgba(61,220,151,.06); } .node.bw .t{ color:var(--c-bw); }
+  .node.bw.detect{ border-color:rgba(242,184,75,.6); background:rgba(242,184,75,.06); } .node.bw.detect .t{ color:var(--amber); }
+  .node.bw.off{ border-color:rgba(255,107,94,.5); } .node.bw.off .t{ color:var(--deny); }
+  .node.bw.inactive{ border-style:dashed; opacity:.75; }
+  .node.nb{ border-color:rgba(242,184,75,.5); } .node.nb .t{ color:var(--c-nb); }
+  .node.nb.dis{ border-color:var(--border); } .node.nb.dis .t{ color:var(--muted); }
+  .node.be{ border-color:rgba(180,140,255,.45); } .node.be .t{ color:var(--c-backend); }
+  .node.infra{ border-color:rgba(91,157,255,.35); border-style:dotted; } .node.infra .t{ color:var(--info); }
+  .skip-label{ position:relative; z-index:1; margin:0 auto; font-family:var(--mono); font-size:9.5px; color:#4b5d73; background:var(--panel); padding:0 6px; }
+  .flow-row:hover .skip-label{ background:#151e29; }
+  .traffic{ padding-left:12px; font-family:var(--mono); font-size:10.5px; color:var(--muted); }
+  .traffic svg{ display:block; }
+  .traffic .nums{ margin-top:2px; white-space:nowrap; }
+  .traffic .e{ color:var(--deny); }
+  .cert{ font-family:var(--mono); font-size:11px; text-align:right; }
+  .cert.ok{ color:var(--ok); } .cert.warn{ color:var(--amber); } .cert.bad{ color:var(--deny); } .cert.na{ color:var(--muted); }
+  .empty{ color:var(--muted); padding:22px 12px; text-align:center; font-family:var(--mono); font-size:12px; }
+
+  /* Banner */
+  .banner{ border:1px solid rgba(242,184,75,.5); background:rgba(242,184,75,.08); color:var(--amber); border-radius:8px; padding:10px 14px; font-size:13px; margin-bottom:16px; }
+  .banner.err{ border-color:rgba(255,107,94,.5); background:rgba(255,107,94,.08); color:var(--deny); }
+  .banner.ok{ border-color:rgba(61,220,151,.5); background:rgba(61,220,151,.08); color:var(--ok); }
+  .hidden{ display:none !important; }
+
+  /* Drawer */
+  .scrim{ position:fixed; inset:0; background:rgba(3,6,10,.55); z-index:40; }
+  .drawer{ position:fixed; top:0; right:0; bottom:0; width:min(640px,100vw); background:var(--panel); border-left:1px solid var(--border);
+           z-index:50; display:flex; flex-direction:column; box-shadow:-12px 0 40px rgba(0,0,0,.4); }
+  .drawer-head{ padding:16px 18px 0; border-bottom:1px solid var(--border); }
+  .drawer-head .row1{ display:flex; align-items:center; gap:10px; }
+  .drawer-head h3{ margin:0; font-size:16px; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .drawer-head .x{ background:none; border:none; color:var(--muted); font-size:22px; cursor:pointer; line-height:1; }
+  .tabs{ display:flex; gap:2px; margin-top:12px; overflow-x:auto; }
+  .tab{ background:none; border:none; border-bottom:2px solid transparent; color:var(--muted); padding:8px 12px; font-family:var(--mono); font-size:12px; cursor:pointer; white-space:nowrap; }
+  .tab.active{ color:var(--text); border-bottom-color:var(--info); }
+  .tab .dirty{ color:var(--amber); }
+  .drawer-body{ flex:1; overflow-y:auto; padding:16px 18px 24px; }
+  .drawer-foot{ border-top:1px solid var(--border); padding:12px 18px calc(12px + env(safe-area-inset-bottom)); display:flex; gap:10px; align-items:center; }
+  .drawer-foot .msg{ flex:1; font-family:var(--mono); font-size:11.5px; color:var(--muted); }
+  .drawer-foot .msg.dirty{ color:var(--amber); }
+
+  .section{ margin-bottom:20px; }
+  .section h4{ margin:0 0 10px; font-size:11px; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); font-weight:600; display:flex; align-items:center; gap:8px; }
+  .section h4 .line{ flex:1; height:1px; background:var(--border); }
+  .field{ display:grid; grid-template-columns:150px 1fr; gap:6px 12px; align-items:center; margin-bottom:10px; }
+  .field > label{ color:var(--muted); font-size:12.5px; }
+  .field .help{ grid-column:2; color:var(--muted); font-size:11.5px; margin-top:-2px; line-height:1.45; }
+  .field .inline{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .field input[type=text], .field input[type=password], .field input[type=number], .field select, .field textarea{ width:100%; }
+  .seg{ display:inline-flex; border:1px solid var(--border); border-radius:8px; overflow:hidden; flex-wrap:wrap; }
+  .seg button{ background:var(--panel-2); border:none; border-right:1px solid var(--border); color:var(--muted); padding:6px 11px; font-family:var(--mono); font-size:11.5px; cursor:pointer; }
+  .seg button:last-child{ border-right:none; }
+  .seg button.on{ color:#06101f; font-weight:600; }
+  .seg button.on.g{ background:var(--ok); } .seg button.on.a{ background:var(--amber); } .seg button.on.r{ background:var(--deny); } .seg button.on.b{ background:var(--info); }
+  .checks{ display:flex; flex-wrap:wrap; gap:6px; }
+  .checks label{ display:inline-flex; align-items:center; gap:5px; font-family:var(--mono); font-size:11.5px; border:1px solid var(--border); border-radius:6px; padding:4px 8px; cursor:pointer; color:var(--muted); }
+  .checks label.on{ color:var(--text); border-color:var(--info); background:rgba(91,157,255,.1); }
+  .checks input{ margin:0; }
+  .group-list{ max-height:150px; overflow:auto; border:1px solid var(--border); border-radius:8px; padding:6px; background:var(--panel-2); }
+  .group-list label{ display:flex; gap:7px; align-items:center; font-size:12.5px; padding:3px 4px; cursor:pointer; }
+  .switch{ position:relative; display:inline-block; width:36px; height:20px; flex-shrink:0; }
+  .switch input{ opacity:0; width:0; height:0; }
+  .switch .slider{ position:absolute; inset:0; background:var(--panel-2); border:1px solid var(--border); border-radius:999px; cursor:pointer; transition:.15s; }
+  .switch .slider::before{ content:""; position:absolute; width:14px; height:14px; left:2px; top:2px; border-radius:50%; background:var(--muted); transition:.15s; }
+  .switch input:checked + .slider{ background:rgba(61,220,151,.18); border-color:var(--ok); }
+  .switch input:checked + .slider::before{ transform:translateX(16px); background:var(--ok); }
+  .switch input:disabled + .slider{ opacity:.5; cursor:default; }
+  .toggle-line{ display:flex; align-items:center; gap:10px; font-size:13px; }
+  .presets{ display:grid; gap:8px; }
+  .preset{ border:1px solid var(--border); border-radius:8px; padding:10px 12px; cursor:pointer; background:var(--panel-2); }
+  .preset.on{ border-color:var(--ok); background:rgba(61,220,151,.06); }
+  .preset .pt{ font-weight:600; font-size:13px; }
+  .preset .pd{ color:var(--muted); font-size:12px; margin-top:3px; line-height:1.45; }
+
+  /* Settings-Tabelle */
+  .stable{ width:100%; border-collapse:collapse; font-size:12px; }
+  .stable td{ padding:3px 3px; vertical-align:top; border-bottom:1px solid rgba(34,48,65,.5); }
+  .stable input{ width:100%; padding:5px 7px; font-size:11.5px; }
+  .stable td.k{ width:44%; } .stable td.a{ width:58px; text-align:right; white-space:nowrap; }
+  .stable tr.locked input{ opacity:.55; }
+  .stable .cmt{ color:var(--muted); font-size:11px; padding:2px 7px 5px; white-space:pre-wrap; line-height:1.4; }
+  .stable .cmt-edit textarea{ width:100%; font-size:11px; min-height:34px; }
+  .icon-btn{ background:none; border:1px solid transparent; color:var(--muted); cursor:pointer; border-radius:5px; padding:2px 5px; font-size:12px; }
+  .icon-btn:hover{ color:var(--text); border-color:var(--border); }
+  .icon-btn.del:hover{ color:var(--deny); border-color:rgba(255,107,94,.5); }
+
+  /* Uebersicht im Drawer */
+  .vflow{ display:flex; flex-direction:column; gap:0; margin:4px 0 16px; }
+  .vstep{ display:grid; grid-template-columns:110px 1fr; gap:12px; align-items:stretch; }
+  .vstep .lbl{ font-family:var(--mono); font-size:10.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; padding-top:10px; text-align:right; }
+  .vstep .box{ border:1px solid; border-radius:9px; padding:8px 12px; background:var(--panel-2); font-size:12.5px; line-height:1.5; }
+  .vstep .box b{ font-family:var(--mono); font-size:12px; }
+  .vstep .box .m{ color:var(--muted); font-size:11.5px; }
+  .varrow{ display:grid; grid-template-columns:110px 1fr; gap:12px; height:16px; }
+  .varrow div:last-child{ border-left:2px solid #2a3a4e; margin-left:22px; }
+  .varrow.skip div:last-child{ border-left-style:dashed; }
+  .issues{ display:flex; flex-direction:column; gap:6px; margin-bottom:14px; }
+  .issue{ border-radius:7px; padding:7px 10px; font-size:12.5px; border:1px solid; }
+  .issue.error{ color:var(--deny); border-color:rgba(255,107,94,.45); background:rgba(255,107,94,.07); }
+  .issue.warn{ color:var(--amber); border-color:rgba(242,184,75,.45); background:rgba(242,184,75,.07); }
+  .issue.info{ color:var(--info); border-color:rgba(91,157,255,.35); background:rgba(91,157,255,.06); }
+  .kv{ display:grid; grid-template-columns:150px 1fr; gap:4px 12px; font-size:12.5px; }
+  .kv div:nth-child(odd){ color:var(--muted); }
+  .kv .mono{ font-family:var(--mono); font-size:12px; overflow-wrap:anywhere; }
+
+  /* Modal */
+  .modal{ position:fixed; inset:0; z-index:70; display:flex; align-items:center; justify-content:center; padding:16px; background:rgba(3,6,10,.65); }
+  .modal .box{ background:var(--panel); border:1px solid var(--border); border-radius:12px; width:min(720px,100%); max-height:92vh; display:flex; flex-direction:column; box-shadow:0 20px 60px rgba(0,0,0,.5); }
+  .modal .mh{ padding:16px 18px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:10px; }
+  .modal .mh h3{ margin:0; font-size:15px; flex:1; }
+  .modal .mb{ padding:16px 18px; overflow-y:auto; }
+  .modal .mf{ padding:12px 18px; border-top:1px solid var(--border); display:flex; gap:10px; justify-content:flex-end; align-items:center; flex-wrap:wrap; }
+  .steps{ list-style:none; padding:0; margin:0 0 14px; counter-reset:s; }
+  .steps li{ counter-increment:s; display:grid; grid-template-columns:26px 92px 1fr; gap:8px; align-items:start; padding:7px 0; border-bottom:1px solid rgba(34,48,65,.5); font-size:13px; }
+  .steps li::before{ content:counter(s); font-family:var(--mono); font-size:11px; color:var(--muted); text-align:center; border:1px solid var(--border); border-radius:50%; width:22px; height:22px; line-height:20px; }
+  .sys{ font-family:var(--mono); font-size:10.5px; border-radius:4px; padding:2px 6px; text-align:center; border:1px solid; }
+  .sys.NetBird{ color:var(--c-nb); border-color:rgba(242,184,75,.45); }
+  .sys.BunkerWeb{ color:var(--c-bw); border-color:rgba(61,220,151,.45); }
+  .sys.Traefik{ color:var(--c-traefik); border-color:rgba(91,157,255,.45); }
+  .sys.Pruefung{ color:var(--muted); border-color:var(--border); }
+  .diff{ width:100%; border-collapse:collapse; font-family:var(--mono); font-size:11.5px; margin-bottom:14px; }
+  .diff td{ padding:4px 6px; border-bottom:1px solid rgba(34,48,65,.5); vertical-align:top; overflow-wrap:anywhere; }
+  .diff td.k{ color:var(--muted); width:34%; }
+  .diff .old{ color:var(--deny); text-decoration:line-through; opacity:.8; }
+  .diff .new{ color:var(--ok); }
+  .warnlist{ margin:0 0 12px; padding-left:18px; color:var(--amber); font-size:12.5px; line-height:1.5; }
+  pre.joblog{ background:var(--panel-2); border:1px solid var(--border); border-radius:8px; padding:10px 12px; font-family:var(--mono); font-size:11.5px; line-height:1.5;
+              max-height:52vh; overflow:auto; white-space:pre-wrap; word-break:break-word; margin:0; color:#b9c6d6; }
+  .pill{ display:inline-block; font-family:var(--mono); font-size:11px; border-radius:999px; padding:2px 9px; border:1px solid; white-space:nowrap; }
+  .pill.ok{ color:var(--ok); border-color:rgba(61,220,151,.5); background:rgba(61,220,151,.08); }
+  .pill.error{ color:var(--deny); border-color:rgba(255,107,94,.5); background:rgba(255,107,94,.08); }
+  .pill.warn, .pill.rolled_back{ color:var(--amber); border-color:rgba(242,184,75,.5); background:rgba(242,184,75,.08); }
+  .pill.running{ color:var(--info); border-color:rgba(91,157,255,.5); background:rgba(91,157,255,.08); }
+  .spinner{ display:inline-block; width:12px; height:12px; border:2px solid rgba(91,157,255,.3); border-top-color:var(--info); border-radius:50%; animation:spin .8s linear infinite; vertical-align:-2px; }
+  @keyframes spin{ to{ transform:rotate(360deg); } }
+  table.jobs{ width:100%; border-collapse:collapse; font-size:12.5px; }
+  table.jobs th{ text-align:left; font-family:var(--mono); font-size:10.5px; color:var(--muted); text-transform:uppercase; font-weight:500; padding:6px 8px; border-bottom:1px solid var(--border); }
+  table.jobs td{ padding:6px 8px; border-bottom:1px solid rgba(34,48,65,.6); }
+  table.jobs tr{ cursor:pointer; } table.jobs tr:hover td{ background:rgba(91,157,255,.05); }
+  .mono{ font-family:var(--mono); }
+  .muted{ color:var(--muted); }
+
+  @media (max-width: 1100px){
+    .flow-head{ display:none; }
+    .flow-row{ grid-template-columns: 14px 1fr auto; row-gap:6px; padding:10px 12px; }
+    .flow-row > .dom{ grid-column:2; }
+    .flow-row > .cert{ grid-column:3; grid-row:1; }
+    .flow-row > .cell, .flow-row > .traffic{ grid-column:1 / -1; }
+    .flow-row > .cell{ height:auto; padding:0 0 0 22px; }
+    .flow-row > .cell::before{ display:none; }
+    .flow-row > .cell.skip{ display:none; }
+    .flow-row > .traffic{ padding-left:22px; display:flex; gap:10px; align-items:center; }
+    .node{ display:flex; gap:8px; align-items:baseline; }
+  }
+  @media (max-width: 640px){
+    header.top{ padding-left:16px; padding-right:16px; }
+    main{ padding:12px; }
+    .field{ grid-template-columns:1fr; }
+    .field .help{ grid-column:1; }
+    .vstep, .varrow{ grid-template-columns:70px 1fr; }
+    input[type=search]{ width:100%; }
+    .steps li{ grid-template-columns:26px 1fr; }
+    .steps li .sys{ grid-column:2; justify-self:start; }
+    .steps li span:last-child{ grid-column:2; }
+  }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="brand">
+    <div class="dot"></div>
+    <div>
+      <h1>Domains &amp; Verkehrswege</h1>
+      <span class="sub">Traefik · BunkerWeb · NetBird</span>
+    </div>
+  </div>
+  <a class="back-link" href="/">← Zurück zum Dashboard</a>
+</header>
+
+<main>
+  <div id="banner" class="banner hidden"></div>
+
+  <div class="tiles" id="tiles"></div>
+
+  <div class="card" style="padding-bottom:6px">
+    <div class="toolbar">
+      <input type="search" id="search" placeholder="Domain oder Backend suchen …">
+      <div class="chips" id="chips"></div>
+      <div class="grow"></div>
+      <button class="btn ghost" id="btn-certs" title="Zertifikate aller Domains neu pruefen (nur TLS-Handshake)">⟳ Zertifikate</button>
+      <button class="btn ghost" id="btn-reload">⟳ Aktualisieren</button>
+      <button class="btn primary" id="btn-new">+ Neue Domain</button>
+    </div>
+    <div class="flow-head">
+      <div></div>
+      <div>Domain</div>
+      <div class="lg"><span class="sw" style="background:var(--c-traefik)"></span>Traefik</div>
+      <div class="lg"><span class="sw" style="background:var(--c-bw)"></span>BunkerWeb</div>
+      <div class="lg"><span class="sw" style="background:var(--c-nb)"></span>NetBird-Proxy</div>
+      <div class="lg"><span class="sw" style="background:var(--c-backend)"></span>Backend</div>
+      <div style="padding-left:12px">Verkehr 24 h</div>
+      <div style="text-align:right">Zertifikat</div>
+    </div>
+    <div id="rows"><div class="empty"><span class="spinner"></span> lade …</div></div>
+  </div>
+
+  <div class="card">
+    <h2>Letzte Änderungen</h2>
+    <div style="overflow-x:auto"><table class="jobs" id="jobs"></table></div>
+  </div>
+</main>
+
+<div class="scrim hidden" id="scrim"></div>
+<aside class="drawer hidden" id="drawer" aria-modal="true" role="dialog">
+  <div class="drawer-head">
+    <div class="row1">
+      <span class="status-dot" id="d-dot"></span>
+      <h3 id="d-title">–</h3>
+      <button class="x" id="d-close" title="Schliessen">×</button>
+    </div>
+    <div class="tabs" id="d-tabs"></div>
+  </div>
+  <div class="drawer-body" id="d-body"></div>
+  <div class="drawer-foot" id="d-foot">
+    <span class="msg" id="d-msg"></span>
+    <button class="btn ghost" id="d-reset">Verwerfen</button>
+    <button class="btn primary" id="d-preview">Vorschau &amp; Anwenden …</button>
+  </div>
+</aside>
+
+<div class="modal hidden" id="modal">
+  <div class="box">
+    <div class="mh"><h3 id="m-title">–</h3><span id="m-status"></span></div>
+    <div class="mb" id="m-body"></div>
+    <div class="mf" id="m-foot"></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = (s, r=document) => r.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const METHODS = ["GET","POST","HEAD","PUT","DELETE","PATCH","OPTIONS"];
+const FILTERS = [["all","Alle"],["bw","Über BunkerWeb"],["direct","Direkt (NetBird)"],["infra","Traefik intern"],["issues","Mit Hinweisen"],["off","Deaktiviert"]];
+
+let S = { items:[], certs:{}, lookups:null, catalog:null, filter:"all", q:"", sel:null, form:null, orig:null, tab:"overview", polling:null };
+
+async function api(url, opts={}){
+  const r = await fetch(url, Object.assign({headers:{"Content-Type":"application/json"}}, opts));
+  let data = null; try{ data = await r.json(); }catch(e){}
+  if(!r.ok) throw new Error((data && data.error) || `HTTP ${r.status}`);
+  return data;
+}
+function banner(text, cls=""){
+  const b = $("#banner");
+  if(!text){ b.className = "banner hidden"; return; }
+  b.className = "banner " + cls; b.innerHTML = text;
+}
+
+/* ------------------------------------------------------------------ Daten */
+async function loadOverview(){
+  try{
+    const d = await api("/api/domains");
+    S.items = d.items;
+    const errs = (d.errors||[]).map(esc);
+    if(!d.configured) errs.unshift("Domain-Verwaltung ist nicht vollständig konfiguriert (BW_COMPOSE_DIR / TRAEFIK_DYNAMIC_PATH) – nur Ansicht.");
+    banner(errs.length ? errs.join("<br>") : "", "err");
+    render();
+    loadCerts(false);
+  }catch(e){ banner("Übersicht konnte nicht geladen werden: " + esc(e.message), "err"); }
+}
+async function loadCerts(force){
+  const names = S.items.filter(i => i.route !== "traefik" || i.nb).map(i => i.domain).concat(S.items.filter(i=>i.route==="traefik"&&!i.nb).map(i=>i.domain));
+  for(let i=0;i<names.length;i+=40){
+    try{
+      const d = await api(`/api/domains/certs?domains=${encodeURIComponent(names.slice(i,i+40).join(","))}${force?"&force=1":""}`);
+      Object.assign(S.certs, d);
+      render();
+    }catch(e){}
+  }
+}
+async function loadLookups(force){
+  if(S.lookups && !force) return S.lookups;
+  S.lookups = await api("/api/domains/lookups" + (force?"?force=1":""));
+  return S.lookups;
+}
+async function loadCatalog(){
+  if(S.catalog) return S.catalog;
+  try{ S.catalog = await api("/api/domains/bw-catalog"); }catch(e){ S.catalog = {}; }
+  return S.catalog;
+}
+async function loadJobs(){
+  try{
+    const jobs = await api("/api/domains/jobs");
+    const t = $("#jobs");
+    if(!jobs.length){ t.innerHTML = `<tr><td class="muted">Noch keine Änderungen über das Dashboard.</td></tr>`; return; }
+    t.innerHTML = `<tr><th>Zeit</th><th>Domain</th><th>Aktion</th><th>Status</th><th>Ergebnis</th></tr>` + jobs.map(j => `
+      <tr data-job="${j.id}"><td class="mono">${esc(fmtTime(j.created_at))}</td><td>${esc(j.domain)}</td>
+      <td class="mono">${esc({save:"ändern",create:"anlegen",delete:"löschen"}[j.action]||j.action)}</td>
+      <td>${statusPill(j.status)}</td><td class="muted">${esc(j.summary||"")}</td></tr>`).join("");
+    t.querySelectorAll("tr[data-job]").forEach(tr => tr.onclick = () => showJob(+tr.dataset.job));
+  }catch(e){}
+}
+function fmtTime(iso){
+  if(!iso) return "–";
+  const d = new Date(iso); return d.toLocaleString("de-CH",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"});
+}
+function statusPill(s){
+  const lbl = {ok:"OK",error:"Fehler",warn:"Hinweis",running:"läuft",rolled_back:"zurückgerollt"}[s] || s;
+  return `<span class="pill ${esc(s)}">${s==="running"?'<span class="spinner"></span> ':""}${esc(lbl)}</span>`;
+}
+
+/* ------------------------------------------------------------------ Übersicht */
+function itemLevel(i){
+  if(i.issues.some(x=>x.level==="error")) return "error";
+  if(i.nb && i.nb.enabled === false) return "off";
+  const c = S.certs[i.domain];
+  if(i.issues.some(x=>x.level==="warn") || (c && c.ok === false) || (c && c.ok && c.days_left < 14)) return "warn";
+  return "ok";
+}
+function matchesFilter(i){
+  const f = S.filter;
+  if(f==="bw" && i.route!=="bunkerweb") return false;
+  if(f==="direct" && i.route!=="passthrough") return false;
+  if(f==="infra" && i.route!=="traefik") return false;
+  if(f==="issues" && !["warn","error"].includes(itemLevel(i))) return false;
+  if(f==="off" && !(i.nb && i.nb.enabled===false)) return false;
+  if(S.q){
+    const t = (i.nb && i.nb.target) || {};
+    const hay = [i.domain, t.host, t.port, i.bw && i.bw.note, i.traefik.router].join(" ").toLowerCase();
+    if(!hay.includes(S.q)) return false;
+  }
+  return true;
+}
+function renderTiles(){
+  const it = S.items;
+  const bw = it.filter(i=>i.route==="bunkerweb").length;
+  const pt = it.filter(i=>i.route==="passthrough").length;
+  const infra = it.filter(i=>i.route==="traefik").length;
+  const iss = it.filter(i=>["warn","error"].includes(itemLevel(i))).length;
+  const certSoon = Object.values(S.certs).filter(c=>c.ok===false || (c.ok && c.days_left<14)).length;
+  const tiles = [
+    ["all","","Domains",it.length,""],
+    ["bw","bw","Über BunkerWeb",bw,`${it.length?Math.round(bw*100/Math.max(1,bw+pt)):0}%`],
+    ["direct","pt","Direkt NetBird",pt,""],
+    ["infra","","Traefik intern",infra,""],
+    ["issues",iss?"iss":"","Hinweise",iss,""],
+    ["issues",certSoon?"err":"","Zertifikat-Probleme",certSoon,""],
+  ];
+  $("#tiles").innerHTML = tiles.map(([f,cls,k,v,small]) =>
+    `<div class="tile ${cls} ${S.filter===f&&f!=="all"?"active":""}" data-f="${f}"><div class="k">${esc(k)}</div><div class="v">${v}${small?`<small>${esc(small)}</small>`:""}</div></div>`).join("");
+  $("#tiles").querySelectorAll(".tile").forEach(t => t.onclick = () => { S.filter = t.dataset.f; render(); });
+  $("#chips").innerHTML = FILTERS.map(([k,l]) => `<button class="chip ${S.filter===k?"active":""}" data-f="${k}">${esc(l)}</button>`).join("");
+  $("#chips").querySelectorAll(".chip").forEach(c => c.onclick = () => { S.filter = c.dataset.f; render(); });
+}
+function sparkline(h){
+  if(!h) return "";
+  const max = Math.max(1, ...h); const w = 116, ht = 18, bw = w/24;
+  return `<svg width="${w}" height="${ht}" viewBox="0 0 ${w} ${ht}" aria-hidden="true">` + h.map((v,i) => {
+    const bh = v ? Math.max(1.5, v/max*ht) : 0.8;
+    return `<rect x="${(i*bw).toFixed(1)}" y="${(ht-bh).toFixed(1)}" width="${(bw-1).toFixed(1)}" height="${bh.toFixed(1)}" rx="0.8" fill="${v?"#3f6fb5":"#223041"}"/>`;
+  }).join("") + `</svg>`;
+}
+function fmtNum(n){ return n>=10000 ? (n/1000).toFixed(0)+"k" : n>=1000 ? (n/1000).toFixed(1)+"k" : String(n); }
+function wafLabel(w){ return {On:"WAF blockiert",DetectionOnly:"WAF protokolliert",Off:"WAF aus"}[w] || w; }
+function targetLabel(t){
+  if(!t) return "–";
+  const port = t.port ? `:${t.port}` : "";
+  return `${t.protocol==="https"?"https://":""}${t.host}${port}`;
+}
+function typeLabel(tt){ return {host:"Host-Ressource",subnet:"Subnetz",peer:"Peer",domain:"Domain",cluster:"Cluster"}[tt] || tt || ""; }
+function badgesFor(i){
+  const b = [];
+  if(i.nb){
+    const a = i.nb.auth, ac = i.nb.access;
+    if(a.sso_enabled) b.push(`<span class="badge sso" title="NetBird-SSO: ${esc(a.sso_group_names.join(", "))}">SSO</span>`);
+    if(a.password_enabled) b.push(`<span class="badge pw">Passwort</span>`);
+    if(a.pin_enabled) b.push(`<span class="badge pw">PIN</span>`);
+    const co = i.countries || {allowed:[], blocked:[]};
+    const by = co.enforced_by === "bunkerweb" ? "BunkerWeb" : "NetBird";
+    if(co.allowed.length) b.push(`<span class="badge geo" title="Nur aus diesen Ländern – durchgesetzt von ${by}">${esc(co.allowed.join(" "))}${co.enforced_by==="bunkerweb"?" ·BW":""}</span>`);
+    if(co.blocked.length) b.push(`<span class="badge geo" title="Gesperrte Länder – durchgesetzt von ${by}">¬${esc(co.blocked.join(" "))}${co.enforced_by==="bunkerweb"?" ·BW":""}</span>`);
+    if(ac.crowdsec_mode==="enforce") b.push(`<span class="badge cs" title="CrowdSec in netbird-proxy">CrowdSec</span>`);
+    if(ac.crowdsec_mode==="observe") b.push(`<span class="badge" title="CrowdSec nur beobachten">CS observe</span>`);
+    if(i.nb.enabled===false) b.push(`<span class="badge bad">deaktiviert</span>`);
+  }
+  if(i.backup_sync && i.backup_sync.enabled===false) b.push(`<span class="badge" title="Nicht im Backup-Proxy-Sync">kein Backup</span>`);
+  return b.join("");
+}
+function rowHtml(i){
+  const lvl = itemLevel(i);
+  const c = S.certs[i.domain];
+  let certHtml = `<div class="cert na">…</div>`;
+  if(c){
+    if(c.ok) certHtml = `<div class="cert ${c.days_left<14?"warn":"ok"}" title="${esc(c.issuer)} · gültig bis ${esc(fmtTime(c.not_after))}">${c.days_left} T</div>`;
+    else certHtml = `<div class="cert bad" title="${esc(c.error)}">✕ ungültig</div>`;
+  }
+  // Traefik
+  let tr;
+  if(i.route==="bunkerweb") tr = `<div class="node traefik"><div class="t">TLS · HTTP</div><div class="s">${esc(i.traefik.router_source==="label"?"Label-Router":"Router "+(i.traefik.router||""))}</div></div>`;
+  else if(i.route==="traefik") tr = `<div class="node traefik"><div class="t">TLS · HTTP</div><div class="s">${esc(i.traefik.router||"")}</div></div>`;
+  else tr = `<div class="node pass"><div class="t">Passthrough</div><div class="s">TLS bei NetBird</div></div>`;
+  // BunkerWeb
+  let bwc, bwCls = "";
+  if(i.route==="bunkerweb" && i.bw){
+    const cls = i.bw.waf==="On" ? "" : i.bw.waf==="DetectionOnly" ? "detect" : "off";
+    bwc = `<div class="node bw ${cls}"><div class="t">BunkerWeb</div><div class="s">${esc(wafLabel(i.bw.waf))}${i.bw.whitelist?" · WL":""}</div></div>`;
+  }else if(i.route==="bunkerweb"){
+    bwc = `<div class="node bw off"><div class="t">BunkerWeb ✕</div><div class="s">keine Site!</div></div>`;
+  }else if(i.bw){
+    bwc = `<div class="node bw inactive detect"><div class="t">BW inaktiv</div><div class="s">kein Router</div></div>`;
+  }else if(i.route==="traefik"){
+    bwc = ""; bwCls = "none";
+  }else{
+    bwc = `<span class="skip-label">direkt</span>`; bwCls = "skip";
+  }
+  // NetBird
+  let nbc, nbCls = "";
+  if(i.nb){
+    nbc = `<div class="node nb ${i.nb.enabled===false?"dis":""}"><div class="t">NetBird${i.nb.enabled===false?" (aus)":""}</div><div class="s">${esc(typeLabel(i.nb.target.target_type))}${i.nb.targets_count>1?` +${i.nb.targets_count-1}`:""}</div></div>`;
+  }else if(i.route==="traefik"){
+    nbc = ""; nbCls = "none";
+  }else{
+    nbc = `<div class="node nb dis"><div class="t">kein Service</div><div class="s">–</div></div>`;
+  }
+  // Backend
+  let bec;
+  if(i.nb) bec = `<div class="node be"><div class="t" title="${esc(targetLabel(i.nb.target))}">${esc(targetLabel(i.nb.target))}</div><div class="s">${esc(i.nb.target.protocol||"")}${i.nb.target.skip_tls_verify?" · TLS ungeprüft":""}${i.nb.target.path?" · "+esc(i.nb.target.path):""}</div></div>`;
+  else if(i.route==="traefik") bec = `<div class="node infra"><div class="t">${esc((i.traefik.infra||[]).map(r=>r.container).filter((v,k,a)=>a.indexOf(v)===k).join(", "))}</div><div class="s">Docker-Container (Traefik-Label)</div></div>`;
+  else bec = `<div class="node be"><div class="t">–</div></div>`;
+  const t = i.traffic;
+  const traffic = t ? `${sparkline(t.hourly)}<div class="nums">${fmtNum(t.requests)} Req${t.errors_5xx?` · <span class="e">${fmtNum(t.errors_5xx)}×5xx</span>`:""}${t.bw_blocked?` · <span title="von BunkerWeb blockiert">${fmtNum(t.bw_blocked)} BW-Block</span>`:""}</div>` : `<div class="nums">kein Verkehr</div>`;
+  const infraRow = i.route==="traefik";
+  return `<div class="flow-row ${S.sel===i.domain?"sel":""} ${i.nb&&i.nb.enabled===false?"disabled":""}" data-d="${esc(i.domain)}">
+    <span class="status-dot ${lvl}"></span>
+    <div class="dom"><div class="name" title="${esc(i.domain)}">${esc(i.domain)}</div><div class="badges">${badgesFor(i)}</div></div>
+    <div class="cell first">${tr}</div>
+    <div class="cell ${bwCls}">${bwc}</div>
+    <div class="cell ${infraRow?"skip":""} ${nbCls}">${nbc}</div>
+    <div class="cell last">${bec}</div>
+    <div class="traffic">${traffic}</div>
+    ${certHtml}
+  </div>`;
+}
+function render(){
+  renderTiles();
+  const list = S.items.filter(matchesFilter);
+  const groups = [
+    ["Über BunkerWeb (WAF)", list.filter(i=>i.route==="bunkerweb")],
+    ["Direkt über NetBird-Proxy", list.filter(i=>i.route==="passthrough")],
+    ["Traefik intern", list.filter(i=>i.route==="traefik")],
+  ];
+  const html = groups.filter(g=>g[1].length).map(([t,arr]) => `<div class="group-title">${esc(t)} · ${arr.length}</div>` + arr.map(rowHtml).join("")).join("");
+  $("#rows").innerHTML = html || `<div class="empty">Keine Domains für diesen Filter.</div>`;
+  $("#rows").querySelectorAll(".flow-row").forEach(r => r.onclick = () => openDrawer(r.dataset.d));
+}
+
+/* ------------------------------------------------------------------ Drawer / Formular */
+function itemByDomain(d){ return S.items.find(i => i.domain === d); }
+function formFromItem(i){
+  const nb = i && i.nb;
+  return {
+    domain: i ? i.domain : "",
+    isNew: !i,
+    infra: !!(i && i.route==="traefik" && !i.nb),
+    hasNb: !!nb,
+    nb: {
+      enabled: nb ? nb.enabled !== false : true,
+      target: nb ? {target_type:nb.target.target_type, target_id:nb.target.target_id, host:nb.target.host||"", port:nb.target.port||0, protocol:nb.target.protocol||"http", skip_tls_verify:!!nb.target.skip_tls_verify}
+                 : {target_type:"host", target_id:"", host:"", port:80, protocol:"http", skip_tls_verify:false},
+      pass_host_header: nb ? !!nb.pass_host_header : true,
+      rewrite_redirects: nb ? !!nb.rewrite_redirects : false,
+      auth: {sso_enabled: nb?nb.auth.sso_enabled:false, sso_groups: nb?[...nb.auth.sso_groups]:[], password_enabled: nb?nb.auth.password_enabled:false, password:"", pin_enabled: nb?nb.auth.pin_enabled:false, pin:""},
+      access: {allowed_countries: i&&i.countries?[...i.countries.allowed]:["CH"], blocked_countries: i&&i.countries?[...i.countries.blocked]:[], crowdsec_mode: nb?nb.access.crowdsec_mode:"enforce"},
+    },
+    bw: {
+      enabled: !!(i && i.route==="bunkerweb"),
+      configured: !!(i && i.bw),
+      preset: (i && i.bw && i.bw.preset) || "",
+      note: (i && i.bw && i.bw.note) || "",
+      settings: i && i.bw ? i.bw.settings.map(s=>({...s})) : null,
+    },
+  };
+}
+function isDirty(part){
+  if(!S.form || !S.orig) return false;
+  if(S.form.isNew) return true;
+  if(part) return JSON.stringify(S.form[part]) !== JSON.stringify(S.orig[part]);
+  return JSON.stringify(S.form) !== JSON.stringify(S.orig);
+}
+async function openDrawer(domain, tab){
+  const i = domain ? itemByDomain(domain) : null;
+  S.sel = domain || null;
+  S.form = formFromItem(i);
+  S.orig = JSON.parse(JSON.stringify(S.form));
+  S.tab = tab || (i ? "overview" : "nb");
+  $("#scrim").classList.remove("hidden"); $("#drawer").classList.remove("hidden");
+  document.body.style.overflow = "hidden";
+  render();
+  drawDrawer();
+  try{ await loadLookups(); drawDrawer(); }catch(e){ $("#d-msg").textContent = "NetBird-Listen nicht ladbar: " + e.message; }
+}
+function closeDrawer(force){
+  if(!force && isDirty() && !S.form.isNew && !confirm("Ungespeicherte Änderungen verwerfen?")) return;
+  if(!force && S.form && S.form.isNew && S.form.domain && !confirm("Neue Domain verwerfen?")) return;
+  $("#scrim").classList.add("hidden"); $("#drawer").classList.add("hidden");
+  document.body.style.overflow = "";
+  S.sel = null; S.form = null; render();
+}
+function drawDrawer(){
+  const f = S.form, i = itemByDomain(f.domain);
+  $("#d-title").textContent = f.isNew ? "Neue Domain" : f.domain;
+  $("#d-dot").className = "status-dot " + (i ? itemLevel(i) : "off");
+  const tabs = f.isNew ? [["nb","1 · NetBird"],["bw","2 · BunkerWeb"]]
+            : f.infra ? [["overview","Übersicht"]]
+            : [["overview","Übersicht"],["nb","NetBird"],["bw","BunkerWeb"],["danger","Löschen"]];
+  $("#d-tabs").innerHTML = tabs.map(([k,l]) => `<button class="tab ${S.tab===k?"active":""}" data-t="${k}">${esc(l)}${(k==="nb"||k==="bw")&&isDirty(k)&&!f.isNew?' <span class="dirty">●</span>':""}</button>`).join("");
+  $("#d-tabs").querySelectorAll(".tab").forEach(t => t.onclick = () => { S.tab = t.dataset.t; drawDrawer(); });
+  const body = $("#d-body");
+  if(S.tab==="overview") body.innerHTML = overviewHtml(i);
+  else if(S.tab==="nb") body.innerHTML = nbFormHtml();
+  else if(S.tab==="bw") body.innerHTML = bwFormHtml();
+  else if(S.tab==="danger") body.innerHTML = dangerHtml();
+  bindDrawer();
+  updateFoot();
+}
+function updateFoot(){
+  const f = S.form; const foot = $("#d-foot");
+  foot.classList.toggle("hidden", f.infra || S.tab==="danger" || (S.tab==="overview" && !isDirty()));
+  const msg = $("#d-msg");
+  if(f.isNew){ msg.textContent = "Neue Domain – Vorschau zeigt alle Schritte vor dem Ausführen."; msg.className = "msg"; }
+  else if(isDirty()){ msg.textContent = "Ungespeicherte Änderungen" + (isDirty("nb")&&isDirty("bw")?" (NetBird + BunkerWeb)":isDirty("nb")?" (NetBird)":" (BunkerWeb)"); msg.className = "msg dirty"; }
+  else { msg.textContent = "Keine Änderungen"; msg.className = "msg"; }
+  $("#d-preview").disabled = !f.isNew && !isDirty();
+  $("#d-reset").classList.toggle("hidden", f.isNew || !isDirty());
+}
+
+function overviewHtml(i){
+  if(!i) return "";
+  const c = S.certs[i.domain];
+  const issues = i.issues.length ? `<div class="issues">${i.issues.map(x=>`<div class="issue ${esc(x.level)}">${esc(x.text)}</div>`).join("")}</div>` : "";
+  const st = [];
+  st.push(["Internet", `<div class="box" style="border-color:var(--border)"><b>https://${esc(i.domain)}</b><div class="m">DNS → Router → Traefik :443</div></div>`]);
+  if(i.route==="passthrough") st.push(["Traefik", `<div class="box" style="border-color:var(--border);border-style:dashed"><b>TCP-Passthrough</b> (Catch-all HostSNI *)<div class="m">TLS wird erst bei netbird-proxy terminiert, Zertifikat von NetBird</div></div>`, true]);
+  else st.push(["Traefik", `<div class="box" style="border-color:rgba(91,157,255,.55)"><b>HTTP-Router ${esc(i.traefik.router||"")}</b> ${i.traefik.router_source==="label"?"(Docker-Label)":i.traefik.router_source==="file"?"(traefik-dynamic.yaml)":""}<div class="m">TLS + Let's-Encrypt-Zertifikat bei Traefik${i.route==="traefik"?" · "+esc((i.traefik.infra||[]).map(r=>r.rule).join(" | ")):""}</div></div>`]);
+  if(i.route==="bunkerweb"){
+    const b = i.bw;
+    const co = i.countries || {allowed:[], blocked:[]};
+    const coTxt = (co.allowed.length ? "nur " + co.allowed.join(" ") : "alle") + (co.blocked.length ? " ohne " + co.blocked.join(" ") : "");
+    st.push(["BunkerWeb", b ? `<div class="box" style="border-color:rgba(61,220,151,.55)"><b>${esc(wafLabel(b.waf))}</b> · Länder ${esc(coTxt)} · Methoden ${esc(b.methods)} · Rate ${esc(b.rate)}${b.whitelist?`<div class="m">Whitelist: ${esc(b.whitelist)}</div>`:""}${b.note?`<div class="m">${esc(b.note)}</div>`:""}<div class="m">CrowdSec-Bouncer, Bad-Behavior, Blacklists, DNSBL, Limits aktiv</div></div>` : `<div class="box" style="border-color:var(--deny)"><b>Keine Site konfiguriert!</b></div>`]);
+  }
+  if(i.nb){
+    const n = i.nb;
+    const acc = [];
+    if(n.auth.sso_enabled) acc.push("SSO (" + n.auth.sso_group_names.join(", ") + ")");
+    if(n.auth.password_enabled) acc.push("Passwort");
+    if(n.auth.pin_enabled) acc.push("PIN");
+    st.push(["NetBird", `<div class="box" style="border-color:rgba(242,184,75,.5)"><b>netbird-proxy</b> · ${n.enabled===false?'<span style="color:var(--deny)">deaktiviert</span>':"aktiv"} · Status ${esc(n.status||"–")}
+      <div class="m">Zugriff: ${esc(acc.join(", ")||"öffentlich")} · Länder (in NetBird): ${esc(n.access.allowed_countries.join(" ")||"alle")}${n.access.blocked_countries.length?" ohne "+esc(n.access.blocked_countries.join(" ")):""} · CrowdSec: ${esc(n.access.crowdsec_mode)}${i.route==="bunkerweb"?" (hinter BunkerWeb wirkungslos)":""}</div>
+      <div class="m">→ WireGuard-Tunnel</div></div>`]);
+    st.push(["Backend", `<div class="box" style="border-color:rgba(180,140,255,.45)"><b>${esc(targetLabel(n.target))}</b><div class="m">${esc(typeLabel(n.target.target_type))}${n.targets_count>1?` · ${n.targets_count} Targets`:""}${n.target.skip_tls_verify?" · Backend-Zertifikat wird nicht geprüft":""}</div></div>`]);
+  }else if(i.route==="traefik"){
+    st.push(["Container", `<div class="box" style="border-color:rgba(91,157,255,.35)">${(i.traefik.infra||[]).map(r=>`<div><b>${esc(r.container)}</b> <span class="m">${esc(r.name)}</span></div>`).join("")}</div>`]);
+  }
+  const flow = `<div class="vflow">` + st.map(([l,box,skip],k) => (k?`<div class="varrow ${skip?"skip":""}"><div></div><div></div></div>`:"") + `<div class="vstep"><div class="lbl">${esc(l)}</div>${box}</div>`).join("") + `</div>`;
+  const t = i.traffic;
+  const kv = [];
+  kv.push(["Zertifikat", c ? (c.ok ? `${esc(c.issuer)} · noch ${c.days_left} Tage (${esc(fmtTime(c.not_after))})` : `<span style="color:var(--deny)">${esc(c.error)}</span>`) : "–"]);
+  if(t) kv.push(["Verkehr 24 h", `${t.requests} Requests · ${t.errors_5xx} × 5xx · ${t.denied} × 401/403/429${t.bw_blocked?` · ${t.bw_blocked} von BunkerWeb blockiert`:""}<div style="margin-top:4px">${sparkline(t.hourly)}</div>`]);
+  if(i.backup_sync) kv.push(["Backup-Proxy", i.backup_sync.enabled ? `synchronisiert · ${esc(i.backup_sync.status||"–")}` : "ausgenommen"]);
+  if(i.nb) kv.push(["NetBird-ID", `<span class="mono">${esc(i.nb.id)}</span>`]);
+  return `${issues}${flow}
+    <div class="section"><h4>Status <span class="line"></span></h4><div class="kv">${kv.map(([k,v])=>`<div>${esc(k)}</div><div>${v}</div>`).join("")}</div></div>
+    <div class="section"><h4>Live-Prüfung <span class="line"></span></h4>
+      <p class="hint" style="margin-bottom:8px">Ein einzelner Aufruf von <code>https://${esc(i.domain)}/</code> über Traefik (inkl. Zertifikatsprüfung).</p>
+      <button class="btn sm" id="btn-check">Jetzt prüfen</button> <span id="check-out" class="mono" style="font-size:12px"></span>
+    </div>
+    ${i.route==="passthrough" && i.nb && !i.infra ? `<div class="section"><h4>Schnellaktion <span class="line"></span></h4><p class="hint" style="margin-bottom:8px">Domain hinter BunkerWeb (WAF) stellen – Einstellungen im Tab BunkerWeb.</p><button class="btn sm" id="btn-go-bw">BunkerWeb aktivieren …</button></div>` : ""}`;
+}
+
+function resourceOptions(type){
+  const L = S.lookups; if(!L) return [];
+  if(type==="peer") return L.peers.map(p => ({id:p.id, label:`${p.name} – ${p.ip}${p.connected?"":" (offline)"}`, host:p.ip}));
+  return L.resources.filter(r => r.type===type).map(r => ({id:r.id, label:`${r.name} – ${r.address} (${r.network})`, host: type==="host" ? String(r.address).replace(/\/32$/,"") : "", cidr:r.address}));
+}
+function nbFormHtml(){
+  const f = S.form, n = f.nb, L = S.lookups;
+  if(!f.isNew && !f.hasNb) return `<div class="issue warn">Kein NetBird-Service für diese Domain. Ziel unten setzen, um einen anzulegen.</div>` + nbFields();
+  return nbFields();
+}
+function nbFields(){
+  const f = S.form, n = f.nb, L = S.lookups;
+  const it = itemByDomain(f.domain);
+  const opts = resourceOptions(n.target.target_type);
+  const known = opts.some(o => o.id === n.target.target_id);
+  const sel = opts.find(o => o.id === n.target.target_id);
+  const pdoms = L ? L.proxy_domains.map(d=>d.domain) : [];
+  const groups = L ? L.groups : [];
+  return `
+  ${f.isNew ? `<div class="section"><h4>Domain <span class="line"></span></h4>
+    <div class="field"><label>Domain</label><input type="text" id="f-domain" list="pdoms" placeholder="app.cercatrova.me" value="${esc(f.domain)}" autocomplete="off">
+      <div class="help">Muss unter einer in NetBird validierten Basis-Domain liegen: ${esc(pdoms.join(", ")||"…")}. DNS (A-Record) muss auf die öffentliche IP zeigen.</div></div>
+    <datalist id="pdoms">${pdoms.map(d=>`<option value=".${esc(d)}">`).join("")}</datalist></div>` : ""}
+  <div class="section"><h4>Ziel (Backend) <span class="line"></span></h4>
+    ${it && it.nb && it.nb.targets_count>1 ? `<div class="issue info" style="margin-bottom:10px">Dieser Service hat ${it.nb.targets_count} Targets – hier wird nur das erste bearbeitet, die anderen bleiben unverändert.</div>` : ""}
+    <div class="field"><label>Typ</label><div class="seg" id="f-ttype">${["host","subnet","peer"].map(t=>`<button type="button" class="${n.target.target_type===t?"on b":""}" data-v="${t}">${esc(typeLabel(t))}</button>`).join("")}</div></div>
+    <div class="field"><label>${n.target.target_type==="peer"?"Peer":"Ressource"}</label>
+      <select id="f-tid"><option value="">– wählen –</option>${opts.map(o=>`<option value="${esc(o.id)}" ${o.id===n.target.target_id?"selected":""}>${esc(o.label)}</option>`).join("")}${n.target.target_id && !known ? `<option value="${esc(n.target.target_id)}" selected>${esc(n.target.target_id)} (unbekannt)</option>`:""}</select>
+      <div class="help">${n.target.target_type==="subnet"?"Subnetz-Ressource aus NetBird Networks; IP des Servers im Subnetz unten eintragen.":n.target.target_type==="peer"?"NetBird-Peer; die Mesh-IP wird übernommen.":"Einzelner Host aus NetBird Networks."}</div></div>
+    <div class="field"><label>Host / IP</label><input type="text" id="f-host" value="${esc(n.target.host)}" ${n.target.target_type!=="subnet"&&sel&&sel.host?"":""} placeholder="${n.target.target_type==="subnet"&&sel?esc(sel.cidr):"192.168.1.10"}"></div>
+    <div class="field"><label>Port · Protokoll</label><div class="inline">
+      <input type="number" id="f-port" min="0" max="65535" value="${esc(n.target.port)}" style="width:110px">
+      <div class="seg" id="f-proto">${["http","https"].map(p=>`<button type="button" class="${n.target.protocol===p?"on b":""}" data-v="${p}">${p}</button>`).join("")}</div>
+      <label class="toggle-line" style="font-size:12px" ${n.target.protocol!=="https"?'hidden':""}><input type="checkbox" id="f-skiptls" ${n.target.skip_tls_verify?"checked":""}> Backend-Zertifikat nicht prüfen</label>
+    </div><div class="help">Port 0 = Standardport des Protokolls.</div></div>
+    <div class="field"><label>Optionen</label><div>
+      <label class="toggle-line" style="margin-bottom:6px"><input type="checkbox" id="f-phh" ${n.pass_host_header?"checked":""}> Original-Host-Header ans Backend</label>
+      <label class="toggle-line"><input type="checkbox" id="f-rr" ${n.rewrite_redirects?"checked":""}> Redirects des Backends umschreiben</label></div></div>
+    <div class="field"><label>Service aktiv</label><label class="switch"><input type="checkbox" id="f-enabled" ${n.enabled?"checked":""}><span class="slider"></span></label></div>
+  </div>
+  <div class="section"><h4>Zugriffsschutz (NetBird) <span class="line"></span></h4>
+    <div class="field"><label>NetBird-SSO</label><label class="switch"><input type="checkbox" id="f-sso" ${n.auth.sso_enabled?"checked":""}><span class="slider"></span></label></div>
+    ${n.auth.sso_enabled ? `<div class="field"><label>Erlaubte Gruppen</label><div class="group-list">${groups.map(g=>`<label><input type="checkbox" class="f-grp" value="${esc(g.id)}" ${n.auth.sso_groups.includes(g.id)?"checked":""}> ${esc(g.name)}</label>`).join("")||'<span class="muted">lade …</span>'}</div><div class="help">Leer = alle angemeldeten NetBird-Benutzer.</div></div>` : ""}
+    <div class="field"><label>Passwort</label><div class="inline"><label class="switch"><input type="checkbox" id="f-pw-on" ${n.auth.password_enabled?"checked":""}><span class="slider"></span></label>
+      ${n.auth.password_enabled ? `<input type="password" id="f-pw" autocomplete="new-password" placeholder="${S.orig.nb.auth.password_enabled?"unverändert lassen":"neues Passwort"}" value="${esc(n.auth.password)}" style="flex:1;min-width:160px">` : ""}</div></div>
+    <div class="field"><label>PIN</label><div class="inline"><label class="switch"><input type="checkbox" id="f-pin-on" ${n.auth.pin_enabled?"checked":""}><span class="slider"></span></label>
+      ${n.auth.pin_enabled ? `<input type="password" id="f-pin" inputmode="numeric" autocomplete="new-password" placeholder="${S.orig.nb.auth.pin_enabled?"unverändert lassen":"4-12 Ziffern"}" value="${esc(n.auth.pin)}" style="width:160px">` : ""}</div></div>
+  </div>
+  <div class="section"><h4>Länder &amp; Reputation <span class="line"></span></h4>
+    <div class="issue ${f.bw.enabled?"info":"info"}" style="margin-bottom:10px">Länderregel wird durchgesetzt von <b>${f.bw.enabled?"BunkerWeb":"NetBird"}</b> –
+      ${f.bw.enabled?"die Domain läuft über BunkerWeb, NetBird sieht dort nur die BunkerWeb-IP. Das Dashboard schreibt die Länder als WHITELIST_COUNTRY / BLACKLIST_COUNTRY in BunkerWeb und leert sie in NetBird."
+                    :"direkter Weg, netbird-proxy sieht die echte IP. Beim Umschalten auf BunkerWeb wandert die Regel automatisch mit."}</div>
+    <div class="field"><label>Nur erlauben</label><input type="text" id="f-allow" value="${esc(n.access.allowed_countries.join(", "))}" placeholder="z.B. CH, DE (leer = alle)"></div>
+    <div class="field"><label>Sperren</label><input type="text" id="f-block" value="${esc(n.access.blocked_countries.join(", "))}" placeholder="z.B. RU, CN"></div>
+    <div class="field"><label>CrowdSec (NetBird)</label><div class="seg" id="f-cs">${[["off","aus","r"],["observe","beobachten","a"],["enforce","blockieren","g"]].map(([v,l,c])=>`<button type="button" class="${n.access.crowdsec_mode===v?"on "+c:""}" data-v="${v}">${l}</button>`).join("")}</div>
+      ${f.bw.enabled?'<div class="help">Hinter BunkerWeb wirkungslos (prüft nur die BunkerWeb-IP) – dort schützt der CrowdSec-Bouncer von BunkerWeb.</div>':""}</div>
+  </div>`;
+}
+
+/* --- BunkerWeb-Formular: Schnell-Einstellungen arbeiten direkt auf der Settings-Liste */
+function sget(k){ const s = (S.form.bw.settings||[]).find(x=>x.key===k); return s ? s.value : undefined; }
+function sset(k, v, comment){
+  const arr = S.form.bw.settings; const s = arr.find(x=>x.key===k);
+  if(v === undefined){ if(s) arr.splice(arr.indexOf(s),1); return; }
+  if(s) s.value = v; else arr.push({key:k, value:v, comment:comment||""});
+}
+function bwWaf(){ if(sget("USE_MODSECURITY")==="no") return "Off"; return sget("MODSECURITY_SEC_RULE_ENGINE") || "On"; }
+function bwFormHtml(){
+  const f = S.form, b = f.bw, L = S.lookups || {};
+  const presets = L.presets || {};
+  const head = `<div class="section"><h4>Verkehrsweg <span class="line"></span></h4>
+    <div class="toggle-line" style="margin-bottom:8px"><label class="switch"><input type="checkbox" id="b-on" ${b.enabled?"checked":""}><span class="slider"></span></label>
+    <b>Über BunkerWeb leiten</b> <span class="muted" style="font-size:12px">(Traefik → BunkerWeb-WAF → netbird-proxy)</span></div>
+    <p class="hint">${b.enabled ? "Traefik terminiert TLS und gibt die Domain an BunkerWeb; NetBird-Zugriffsschutz bleibt zusätzlich aktiv." : "Aus: Traefik reicht TLS direkt an netbird-proxy durch (heutiger Standardweg). Die BunkerWeb-Site wird beim Ausschalten entfernt."}</p></div>`;
+  if(!b.enabled) return head;
+  if(!b.settings){
+    return head + `<div class="section"><h4>Vorlage wählen <span class="line"></span></h4><div class="presets">${Object.entries(presets).map(([k,p])=>`
+      <div class="preset" data-p="${esc(k)}"><div class="pt">${esc(p.label)}</div><div class="pd">${esc(p.description)}</div></div>`).join("")}</div>
+      <p class="hint" style="margin-top:8px">Danach sind alle Werte anpassbar. Bei Logins/Passkeys/Zahlungen „Web-App“ wählen.</p></div>`;
+  }
+  const waf = bwWaf();
+  const methods = (sget("ALLOWED_METHODS") || "GET|POST|HEAD").split("|");
+  const appHdr = (L.app_header_keys||[]).every(k => sget(k) === "");
+  const locked = new Set([...(L.locked_keys||[]), ...(L.country_keys||[])]);
+  const cat = S.catalog || {};
+  const rows = b.settings.map((s,idx) => {
+    const isL = locked.has(s.key);
+    const info = cat[s.key] || cat[s.key.replace(/_\d+$/,"")];
+    return `<tr class="${isL?"locked":""}" data-i="${idx}">
+      <td class="k"><input type="text" class="s-key" list="bwkeys" value="${esc(s.key)}" ${isL?"disabled":""} title="${esc(info?info.help:"")}"></td>
+      <td><input type="text" class="s-val" value="${esc(s.value)}" ${isL?"disabled":""} placeholder="(leer)" title="${esc(info?("Default: "+(info.default??"")):"")}"></td>
+      <td class="a">${isL?`<span class="muted" title="${(L.country_keys||[]).includes(s.key)?"Aus den Länder-Feldern (Tab NetBird)":"Vom Dashboard gesetzt"}">🔒</span>`:`<button class="icon-btn s-cmt" title="Kommentar">✎</button><button class="icon-btn del s-del" title="Entfernen">✕</button>`}</td></tr>
+      ${s.comment||s._edit?`<tr data-c="${idx}"><td colspan="3" class="${s._edit?"cmt-edit":"cmt"}">${s._edit?`<textarea class="s-ctext" data-i="${idx}" placeholder="Warum ist dieses Setting gesetzt?">${esc(s.comment)}</textarea>`:esc(s.comment)}</td></tr>`:""}`;
+  }).join("");
+  return head + `
+  <div class="section"><h4>Schutz <span class="line"></span></h4>
+    <div class="field"><label>WAF (ModSecurity)</label><div class="seg" id="b-waf">${[["On","Blockieren","g"],["DetectionOnly","Nur protokollieren","a"],["Off","Aus","r"]].map(([v,l,c])=>`<button type="button" class="${waf===v?"on "+c:""}" data-v="${v}">${l}</button>`).join("")}</div>
+      <div class="help">OWASP CRS. „Nur protokollieren“ zum Einfahren neuer Apps, Treffer erscheinen im BunkerWeb-Log.</div></div>
+    <div class="field"><label>HTTP-Methoden</label><div class="checks" id="b-methods">${METHODS.map(m=>`<label class="${methods.includes(m)?"on":""}"><input type="checkbox" value="${m}" ${methods.includes(m)?"checked":""}>${m}</label>`).join("")}</div></div>
+    <div class="field"><label>Rate-Limit</label><input type="text" id="b-rate" value="${esc(sget("LIMIT_REQ_RATE")||"")}" placeholder="Default 2r/s" style="max-width:160px"><div class="help">Requests pro Sekunde und IP für dynamische Seiten, z.B. <code>20r/s</code>.</div></div>
+    <div class="field"><label>Max. Upload</label><input type="text" id="b-size" value="${esc(sget("MAX_CLIENT_SIZE")||"")}" placeholder="Default 5m" style="max-width:160px"></div>
+    <div class="field"><label>App-eigene Header</label><div class="toggle-line"><label class="switch"><input type="checkbox" id="b-apph" ${appHdr?"checked":""}><span class="slider"></span></label><span style="font-size:12px" class="muted">BunkerWeb fügt keine Security-Header hinzu (X-Frame-Options, CSP, Permissions-Policy, COOP/COEP/CORP, Cookie-Flags)</span></div>
+      <div class="help">Einschalten bei Apps mit eigener CSP, iframes/Embeds, Passkeys oder Kamera – sonst brechen diese Funktionen.</div></div>
+    <div class="field"><label>Whitelist</label><input type="text" id="b-wl" value="${esc(sget("WHITELIST_IP")||"")}" placeholder="z.B. 192.168.0.0/16 (leer = keine)"><div class="help">Diese IPs/Netze umgehen alle BunkerWeb-Prüfungen (z.B. OIDC-Backchannel aus dem LAN).</div></div>
+    <div class="field"><label>Notiz</label><textarea id="b-note" rows="2" placeholder="z.B. BTCPay Server – Zahlungsseiten">${esc(b.note)}</textarea></div>
+  </div>
+  <div class="section"><h4>Alle Settings (${b.settings.length}) <span class="line"></span></h4>
+    <p class="hint" style="margin-bottom:8px">Pro-Site-Settings von BunkerWeb (ohne Domain-Präfix). 🔒 = vom Dashboard verwaltet (Länder: Tab NetBird → „Länder &amp; Reputation“). Hilfe/Default beim Überfahren der Felder.</p>
+    <table class="stable" id="b-table">${rows}</table>
+    <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn sm" id="b-add">+ Setting</button>
+      <select id="b-preset-apply" class="btn sm ghost" style="padding:4px 8px"><option value="">Vorlage neu anwenden …</option>${Object.entries(presets).map(([k,p])=>`<option value="${esc(k)}">${esc(p.label)}</option>`).join("")}</select></div>
+    <datalist id="bwkeys">${Object.keys(cat).sort().map(k=>`<option value="${esc(k)}">`).join("")}</datalist>
+  </div>`;
+}
+function dangerHtml(){
+  const f = S.form, i = itemByDomain(f.domain);
+  const parts = [];
+  if(i.route==="bunkerweb") parts.push("den Traefik-Router");
+  if(i.bw) parts.push("die BunkerWeb-Site");
+  if(i.nb) parts.push("den NetBird-Service (inkl. Zertifikat, Passwort/PIN)");
+  return `<div class="section"><h4>Domain löschen <span class="line"></span></h4>
+    <p class="hint" style="margin-bottom:12px">Entfernt ${esc(parts.join(", "))}. Die Domain ist danach nicht mehr erreichbar. DNS-Einträge und die NetBird-Netzwerk-Ressource bleiben bestehen.</p>
+    <button class="btn danger" id="btn-delete">Löschen vorbereiten …</button></div>`;
+}
+
+function bindDrawer(){
+  const f = S.form;
+  const on = (id, ev, fn) => { const el = document.getElementById(id); if(el) el.addEventListener(ev, fn); };
+  const rerender = () => { const y = $("#d-body").scrollTop; drawDrawer(); $("#d-body").scrollTop = y; };
+  // Übersicht
+  on("btn-check","click", async () => {
+    const out = $("#check-out"); out.innerHTML = '<span class="spinner"></span>';
+    try{
+      const r = await api(`/api/domains/check/${encodeURIComponent(f.domain)}`, {method:"POST"});
+      S.certs[f.domain] = Object.assign({}, r.cert);
+      const h = r.http;
+      out.innerHTML = (h.status ? `<span style="color:${h.ok?"var(--ok)":"var(--deny)"}">HTTP ${h.status}</span>${h.location?" → "+esc(h.location):""}${h.server?` <span class="muted">(${esc(h.server)})</span>`:""}` : `<span style="color:var(--deny)">${esc(h.error)}</span>`)
+        + ` · Zertifikat: ${r.cert.ok?`<span style="color:var(--ok)">ok, ${r.cert.days_left} T</span>`:`<span style="color:var(--deny)">${esc(r.cert.error)}</span>`}`
+        + ` · DNS: ${esc((r.dns||[]).join(", ")||"–")}`;
+      render();
+    }catch(e){ out.textContent = e.message; }
+  });
+  on("btn-go-bw","click", () => { S.tab = "bw"; f.bw.enabled = true; drawDrawer(); });
+  on("btn-delete","click", () => preview("delete"));
+  // NetBird
+  on("f-domain","input", e => { f.domain = e.target.value.trim().toLowerCase(); updateFoot(); });
+  document.querySelectorAll("#f-ttype button").forEach(b => b.onclick = () => { f.nb.target.target_type = b.dataset.v; f.nb.target.target_id = ""; if(b.dataset.v!=="subnet") f.nb.target.host=""; rerender(); });
+  on("f-tid","change", e => {
+    f.nb.target.target_id = e.target.value;
+    const o = resourceOptions(f.nb.target.target_type).find(x => x.id === e.target.value);
+    if(o && o.host) f.nb.target.host = o.host;
+    rerender();
+  });
+  on("f-host","input", e => { f.nb.target.host = e.target.value.trim(); updateFoot(); });
+  on("f-port","input", e => { f.nb.target.port = parseInt(e.target.value||"0",10)||0; updateFoot(); });
+  document.querySelectorAll("#f-proto button").forEach(b => b.onclick = () => { f.nb.target.protocol = b.dataset.v; if(b.dataset.v==="http") f.nb.target.skip_tls_verify=false; rerender(); });
+  on("f-skiptls","change", e => { f.nb.target.skip_tls_verify = e.target.checked; updateFoot(); });
+  on("f-phh","change", e => { f.nb.pass_host_header = e.target.checked; updateFoot(); });
+  on("f-rr","change", e => { f.nb.rewrite_redirects = e.target.checked; updateFoot(); });
+  on("f-enabled","change", e => { f.nb.enabled = e.target.checked; updateFoot(); });
+  on("f-sso","change", e => { f.nb.auth.sso_enabled = e.target.checked; rerender(); });
+  document.querySelectorAll(".f-grp").forEach(c => c.onchange = () => { f.nb.auth.sso_groups = [...document.querySelectorAll(".f-grp:checked")].map(x=>x.value); updateFoot(); });
+  on("f-pw-on","change", e => { f.nb.auth.password_enabled = e.target.checked; if(!e.target.checked) f.nb.auth.password=""; rerender(); });
+  on("f-pw","input", e => { f.nb.auth.password = e.target.value; updateFoot(); });
+  on("f-pin-on","change", e => { f.nb.auth.pin_enabled = e.target.checked; if(!e.target.checked) f.nb.auth.pin=""; rerender(); });
+  on("f-pin","input", e => { f.nb.auth.pin = e.target.value; updateFoot(); });
+  const ccList = v => v.split(/[\s,;]+/).map(x=>x.trim().toUpperCase()).filter(Boolean);
+  on("f-allow","input", e => { f.nb.access.allowed_countries = ccList(e.target.value); updateFoot(); });
+  on("f-block","input", e => { f.nb.access.blocked_countries = ccList(e.target.value); updateFoot(); });
+  document.querySelectorAll("#f-cs button").forEach(b => b.onclick = () => { f.nb.access.crowdsec_mode = b.dataset.v; rerender(); });
+  // BunkerWeb
+  on("b-on","change", e => {
+    f.bw.enabled = e.target.checked;
+    if(e.target.checked && !f.bw.settings && S.orig.bw.settings) f.bw.settings = JSON.parse(JSON.stringify(S.orig.bw.settings));
+    if(e.target.checked) loadCatalog().then(rerender);
+    rerender();
+  });
+  document.querySelectorAll(".preset").forEach(p => p.onclick = async () => {
+    const d = await api(`/api/domains/preset/${p.dataset.p}?domain=${encodeURIComponent(f.domain||"example.org")}`);
+    f.bw.settings = d.settings; f.bw.preset = p.dataset.p;
+    await loadCatalog(); rerender();
+  });
+  on("b-preset-apply","change", async e => {
+    const p = e.target.value; if(!p) return;
+    if(!confirm("Alle Settings durch die Vorlage ersetzen?")){ e.target.value=""; return; }
+    const d = await api(`/api/domains/preset/${p}?domain=${encodeURIComponent(f.domain)}`);
+    f.bw.settings = d.settings; f.bw.preset = p; rerender();
+  });
+  document.querySelectorAll("#b-waf button").forEach(b => b.onclick = () => {
+    const v = b.dataset.v;
+    if(v==="Off"){ sset("USE_MODSECURITY","no"); sset("MODSECURITY_SEC_RULE_ENGINE", undefined); }
+    else { sset("USE_MODSECURITY", undefined); sset("MODSECURITY_SEC_RULE_ENGINE", v==="On" ? undefined : v); }
+    rerender();
+  });
+  document.querySelectorAll("#b-methods input").forEach(c => c.onchange = () => {
+    const sel = METHODS.filter(m => document.querySelector(`#b-methods input[value="${m}"]`).checked);
+    sset("ALLOWED_METHODS", sel.length ? sel.join("|") : "GET"); rerender();
+  });
+  on("b-rate","change", e => { sset("LIMIT_REQ_RATE", e.target.value.trim() || undefined); rerender(); });
+  on("b-size","change", e => { sset("MAX_CLIENT_SIZE", e.target.value.trim() || undefined); rerender(); });
+  on("b-wl","change", e => { sset("WHITELIST_IP", e.target.value.trim() || undefined); rerender(); });
+  on("b-apph","change", e => {
+    const keys = (S.lookups && S.lookups.app_header_keys) || [];
+    keys.forEach((k,ix) => sset(k, e.target.checked ? "" : undefined, ix===0 ? "App setzt eigene Security-Header -> BunkerWeb-Defaults nicht hinzufuegen" : ""));
+    rerender();
+  });
+  on("b-note","input", e => { f.bw.note = e.target.value; updateFoot(); });
+  on("b-add","click", () => { f.bw.settings.push({key:"", value:"", comment:"", _edit:true}); rerender(); const ins = document.querySelectorAll("#b-table .s-key"); if(ins.length) ins[ins.length-1].focus(); });
+  document.querySelectorAll("#b-table tr[data-i]").forEach(tr => {
+    const s = f.bw.settings[+tr.dataset.i];
+    const k = tr.querySelector(".s-key"), v = tr.querySelector(".s-val");
+    if(k) k.onchange = () => { s.key = k.value.trim(); rerender(); };
+    if(v) v.oninput = () => { s.value = v.value; updateFoot(); };
+    if(v) v.onchange = () => rerender();
+    const del = tr.querySelector(".s-del"); if(del) del.onclick = () => { f.bw.settings.splice(+tr.dataset.i,1); rerender(); };
+    const cm = tr.querySelector(".s-cmt"); if(cm) cm.onclick = () => { s._edit = !s._edit; rerender(); };
+  });
+  document.querySelectorAll(".s-ctext").forEach(t => t.oninput = () => { f.bw.settings[+t.dataset.i].comment = t.value; updateFoot(); });
+  if(S.tab==="bw" && f.bw.enabled && !S.catalog) loadCatalog().then(rerender);
+}
+
+/* ------------------------------------------------------------------ Vorschau / Ausführen */
+function buildSpec(action){
+  const f = S.form;
+  const spec = {action: action || (f.isNew ? "create" : "save"), domain: f.domain};
+  if(spec.action === "delete") return spec;
+  if(f.isNew || f.hasNb || f.nb.target.target_id){
+    if(f.isNew || isDirty("nb")){
+      spec.nb = JSON.parse(JSON.stringify(f.nb));
+      if(!spec.nb.auth.password) delete spec.nb.auth.password;
+      if(!spec.nb.auth.pin) delete spec.nb.auth.pin;
+    }
+  }
+  if(f.isNew || isDirty("bw")){
+    spec.bw = {enabled: f.bw.enabled, note: f.bw.note, preset: f.bw.preset || undefined};
+    if(f.bw.enabled && f.bw.settings) spec.bw.settings = f.bw.settings.filter(s=>s.key).map(({key,value,comment}) => ({key,value,comment}));
+  }
+  return spec;
+}
+function diffTable(title, rows){
+  if(!rows || !rows.length) return "";
+  const v = x => x===null||x===undefined ? '<span class="muted">–</span>' : esc(typeof x === "object" ? JSON.stringify(x) : x===""?'""':x);
+  return `<h4 style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin:4px 0 6px">${esc(title)}</h4>
+    <table class="diff">${rows.map(r=>`<tr><td class="k">${esc(r.key)}</td><td>${r.old!==null&&r.old!==undefined?`<div class="old">${v(r.old)}</div>`:""}${r.new!==null&&r.new!==undefined?`<div class="new">${v(r.new)}</div>`:'<div class="old">(entfernt)</div>'}</td></tr>`).join("")}</table>`;
+}
+function openModal(title, body, foot, status){
+  $("#m-title").textContent = title; $("#m-body").innerHTML = body; $("#m-foot").innerHTML = foot; $("#m-status").innerHTML = status || "";
+  $("#modal").classList.remove("hidden");
+}
+function closeModal(){ $("#modal").classList.add("hidden"); if(S.polling){ clearInterval(S.polling); S.polling = null; } }
+async function preview(action){
+  const spec = buildSpec(action);
+  openModal("Vorschau", `<div class="empty"><span class="spinner"></span> plane Änderungen …</div>`, `<button class="btn ghost" id="m-cancel">Abbrechen</button>`);
+  $("#m-cancel").onclick = closeModal;
+  let plan;
+  try{ plan = await api("/api/domains/plan", {method:"POST", body: JSON.stringify(spec)}); }
+  catch(e){
+    $("#m-body").innerHTML = `<div class="issue error">${esc(e.message)}</div>`; return;
+  }
+  if(!plan.steps.length){
+    $("#m-body").innerHTML = `<div class="issue info">Keine Änderungen gegenüber dem aktuellen Zustand.</div>`; return;
+  }
+  const isDel = plan.action === "delete";
+  const dns = plan.dns ? `<p class="hint" style="margin-bottom:10px">DNS ${esc(plan.domain)}: <code>${esc(plan.dns.domain.join(", ")||"nicht auflösbar")}</code> · andere Domains: <code>${esc(plan.dns.reference.join(", ")||"–")}</code></p>` : "";
+  const body = `
+    <p class="hint" style="margin-bottom:12px">${isDel?"Folgendes wird für":"Folgende Schritte werden für"} <b style="color:var(--text)">${esc(plan.domain)}</b> ausgeführt – in dieser Reihenfolge, mit automatischem Rollback bei einem Fehler:</p>
+    <ol class="steps">${plan.steps.map(s=>`<li><span class="sys ${esc(s.system)}">${esc(s.system==="Pruefung"?"Prüfung":s.system)}</span><span>${esc(s.text)}</span></li>`).join("")}</ol>
+    ${plan.warnings.length?`<ul class="warnlist">${plan.warnings.map(w=>`<li>${esc(w)}</li>`).join("")}</ul>`:""}
+    ${dns}
+    ${diffTable("NetBird-Service", plan.nb_diff)}
+    ${diffTable("BunkerWeb-Settings", plan.bw_diff)}
+    ${isDel?`<div class="field" style="margin-top:12px"><label>Zur Bestätigung Domain eingeben</label><input type="text" id="m-confirm" autocomplete="off" placeholder="${esc(plan.domain)}"></div>`:""}`;
+  $("#m-body").innerHTML = body;
+  $("#m-foot").innerHTML = `<button class="btn ghost" id="m-cancel">Abbrechen</button><button class="btn primary ${isDel?"danger":""}" id="m-run" ${isDel?"disabled":""}>${isDel?"Endgültig löschen":"Ausführen"}</button>`;
+  $("#m-cancel").onclick = closeModal;
+  if(isDel) $("#m-confirm").oninput = e => { $("#m-run").disabled = e.target.value.trim() !== plan.domain; };
+  $("#m-run").onclick = async () => {
+    $("#m-run").disabled = true;
+    const req = Object.assign({}, spec, {plan_hash: plan.plan_hash});
+    if(isDel) req.confirm_domain = $("#m-confirm").value.trim();
+    try{
+      const r = await api("/api/domains/apply", {method:"POST", body: JSON.stringify(req)});
+      closeDrawer(true);
+      showJob(r.job_id);
+    }catch(e){
+      $("#m-body").insertAdjacentHTML("afterbegin", `<div class="issue error" style="margin-bottom:10px">${esc(e.message)}</div>`);
+      $("#m-run").disabled = false;
+    }
+  };
+}
+async function showJob(id){
+  openModal("Änderung", `<div class="empty"><span class="spinner"></span></div>`, `<button class="btn ghost" id="m-close">Schliessen</button>`);
+  $("#m-close").onclick = () => { closeModal(); loadOverview(); loadJobs(); };
+  const draw = async () => {
+    let j; try{ j = await api(`/api/domains/jobs/${id}`); }catch(e){ return; }
+    $("#m-title").textContent = `${j.domain} · ${({save:"ändern",create:"anlegen",delete:"löschen"})[j.action]||j.action}`;
+    $("#m-status").innerHTML = statusPill(j.status);
+    const steps = (j.plan && j.plan.steps) || [];
+    const logTxt = j.log || "";
+    const doneIdx = steps.map((s,k)=> logTxt.includes(`Schritt ${k+1}/${steps.length}`)).lastIndexOf(true);
+    const stepHtml = `<ol class="steps">${steps.map((s,k)=>{
+      let mark = "";
+      if(j.status==="running" && k===doneIdx) mark = ' <span class="spinner"></span>';
+      else if(k<doneIdx || (k===doneIdx && j.status==="ok") || (j.status==="warn" && k<=doneIdx)) mark = ' <span style="color:var(--ok)">✓</span>';
+      else if(k===doneIdx && (j.status==="error"||j.status==="rolled_back")) mark = ' <span style="color:var(--deny)">✕</span>';
+      return `<li><span class="sys ${esc(s.system)}">${esc(s.system==="Pruefung"?"Prüfung":s.system)}</span><span>${esc(s.text)}${mark}</span></li>`;
+    }).join("")}</ol>`;
+    const res = j.status!=="running" ? `<div class="banner ${j.status==="ok"?"ok":j.status==="error"?"err":""}" style="margin-bottom:12px">${esc(j.summary||"")}${j.status==="rolled_back"?"<br>Die bereits ausgeführten Schritte wurden zurückgenommen.":""}</div>` : "";
+    const pre = $("#m-body pre.joblog");
+    const atBottom = !pre || pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20;
+    $("#m-body").innerHTML = res + stepHtml + `<pre class="joblog">${esc(logTxt||"…")}</pre>`;
+    const p2 = $("#m-body pre.joblog"); if(atBottom) p2.scrollTop = p2.scrollHeight;
+    if(j.status!=="running" && S.polling){ clearInterval(S.polling); S.polling = null; loadOverview(); loadJobs(); }
+  };
+  await draw();
+  if(S.polling) clearInterval(S.polling);
+  S.polling = setInterval(draw, 1500);
+}
+
+/* ------------------------------------------------------------------ Init */
+$("#search").addEventListener("input", e => { S.q = e.target.value.trim().toLowerCase(); render(); });
+$("#btn-reload").onclick = () => { loadOverview(); loadJobs(); };
+$("#btn-certs").onclick = () => { S.certs = {}; render(); loadCerts(true); };
+$("#btn-new").onclick = () => openDrawer(null);
+$("#d-close").onclick = () => closeDrawer();
+$("#scrim").onclick = () => closeDrawer();
+$("#d-reset").onclick = () => { S.form = JSON.parse(JSON.stringify(S.orig)); drawDrawer(); };
+$("#d-preview").onclick = () => preview();
+document.addEventListener("keydown", e => {
+  if(e.key !== "Escape") return;
+  if(!$("#modal").classList.contains("hidden")){ if(!S.polling) closeModal(); return; }
+  if(!$("#drawer").classList.contains("hidden")) closeDrawer();
+});
+loadOverview(); loadJobs();
+setInterval(() => { if($("#drawer").classList.contains("hidden") && $("#modal").classList.contains("hidden")) loadOverview(); }, 60000);
+</script>
+</body>
+</html>
