@@ -99,6 +99,12 @@ BACKUP_SYNC_DEST = os.environ.get("BACKUP_SYNC_DEST", "/opt/backup-proxy/certs")
 BACKUP_SYNC_REMOTE_CMD = os.environ.get("BACKUP_SYNC_REMOTE_CMD", "/opt/backup-proxy/regenerate-nginx.sh").strip()
 BACKUP_SYNC_CERT_DIR = os.environ.get("BACKUP_SYNC_CERT_DIR", "/backup-sync/certs")
 BACKUP_SYNC_SSH_KEY = os.environ.get("BACKUP_SYNC_SSH_KEY", "/backup-sync/ssh_key")
+# Traefik-Zertifikatsspeicher (acme.json, nur lesend). Domains hinter BunkerWeb haben
+# ihr oeffentliches Zertifikat von Traefik; netbird-proxy kann deren Zertifikate nicht
+# mehr erneuern (TLS-ALPN landet bei Traefik). Der Sync nimmt pro Domain das neueste
+# gueltige Zertifikat aus beiden Quellen.
+BACKUP_SYNC_TRAEFIK_ACME = os.environ.get("BACKUP_SYNC_TRAEFIK_ACME", "/backup-sync/acme.json")
+BACKUP_SYNC_CERT_WARN_DAYS = int(os.environ.get("BACKUP_SYNC_CERT_WARN_DAYS", "14"))
 BACKUP_SYNC_KNOWN_HOSTS = os.path.join(os.path.dirname(DB_PATH) or ".", "backup-sync-known_hosts")
 BACKUP_SYNC_INTERVAL_MINUTES = max(1, int(os.environ.get("BACKUP_SYNC_INTERVAL_MINUTES", "15")))
 BACKUP_SYNC_CONFIGURED = bool(BACKUP_SYNC_HOST and NB_API_BASE and NB_API_TOKEN)
@@ -201,6 +207,11 @@ def migrate_schema(conn):
         conn.execute("ALTER TABLE proxy_events ADD COLUMN as_number TEXT")
     if "as_name" not in existing_columns:
         conn.execute("ALTER TABLE proxy_events ADD COLUMN as_name TEXT")
+    bs_cols = {row["name"] for row in conn.execute("PRAGMA table_info(backup_sync_domains)")}
+    if bs_cols and "cert_source" not in bs_cols:
+        conn.execute("ALTER TABLE backup_sync_domains ADD COLUMN cert_source TEXT")
+    if bs_cols and "cert_not_after" not in bs_cols:
+        conn.execute("ALTER TABLE backup_sync_domains ADD COLUMN cert_not_after TEXT")
 
 
 def init_db():
@@ -1369,6 +1380,73 @@ def _is_active_http_service(svc):
     )
 
 
+def load_traefik_certs():
+    """{domain: (privkey_pem, fullchain_pem)} aus Traefiks acme.json (alle Resolver,
+    Haupt-Domain und SANs). Leeres Dict, wenn nicht vorhanden/lesbar."""
+    import base64
+    out = {}
+    try:
+        with open(BACKUP_SYNC_TRAEFIK_ACME, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return out
+    for resolver in (data or {}).values():
+        for c in (resolver or {}).get("Certificates") or []:
+            try:
+                chain = base64.b64decode(c["certificate"]).decode()
+                key = base64.b64decode(c["key"]).decode()
+            except (KeyError, ValueError, TypeError):
+                continue
+            dom = c.get("domain") or {}
+            for name in [dom.get("main")] + list(dom.get("sans") or []):
+                if name:
+                    out[name.lower()] = (key, chain)
+    return out
+
+
+def cert_not_after(fullchain):
+    """Ablaufdatum (aware datetime) des ersten Zertifikats einer PEM-Kette, sonst None."""
+    import ssl as _ssl
+    m = re.search(r"-----BEGIN CERTIFICATE-----.+?-----END CERTIFICATE-----", fullchain or "", re.S)
+    if not m:
+        return None
+    fd, path = tempfile.mkstemp(suffix=".pem")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(m.group(0) + "\n")
+        info = _ssl._ssl._test_decode_cert(path)
+        return datetime.strptime(info["notAfter"], "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+    finally:
+        os.remove(path)
+
+
+def pick_backup_cert(domain, traefik_certs):
+    """Neuestes noch gueltiges Zertifikat aus Traefik und netbird-proxy ->
+    (source, privkey, fullchain, not_after) oder None."""
+    now = datetime.now(timezone.utc)
+    candidates = []
+    if domain in traefik_certs:
+        key, chain = traefik_certs[domain]
+        candidates.append(("traefik", key, chain))
+    nb_path = os.path.join(BACKUP_SYNC_CERT_DIR, domain)
+    if os.path.isfile(nb_path):
+        with open(nb_path, "r", encoding="utf-8", errors="replace") as f:
+            key, chain = split_cert_bundle(f.read())
+        candidates.append(("netbird", key, chain))
+    best = None
+    for src, key, chain in candidates:
+        if not key or not chain:
+            continue
+        na = cert_not_after(chain)
+        if na is None or na <= now:
+            continue
+        if best is None or na > best[3]:
+            best = (src, key, chain, na)
+    return best
+
+
 def split_cert_bundle(raw):
     """Die Cert-Dateien von netbird-proxy enthalten Private Key + komplette Kette
     in einer Datei. Gibt (privkey_pem, fullchain_pem) zurueck, je '' falls fehlend.
@@ -1466,6 +1544,7 @@ def run_backup_sync(triggered_by):
         _backup_sync_state.update(running=True, run_id=run_id)
 
     output = []
+    cert_info = {}        # domain -> (quelle, not_after)
     synced = []           # Domains, die in diesem Lauf uebertragen werden
     skipped = []          # [{domain, reason, message}]
     status, message = "ok", None
@@ -1491,6 +1570,8 @@ def run_backup_sync(triggered_by):
         os.chmod(workdir, 0o755)
         lines = []
         wanted = 0
+        traefik_certs = load_traefik_certs()
+        output.append(f"Traefik-Zertifikate gelesen: {len(traefik_certs)}")
         for domain in sorted(active):
             svc = active[domain]
             if not enabled.get(domain, True):
@@ -1501,15 +1582,13 @@ def run_backup_sync(triggered_by):
             if not _DOMAIN_RE.match(domain) or scheme not in ("http", "https") or not _TARGET_HOST_RE.match(host):
                 skipped.append({"domain": domain, "reason": "invalid", "message": f"Ungueltige Domain/Ziel: {scheme}://{host}:{port}"})
                 continue
-            cert_src = os.path.join(BACKUP_SYNC_CERT_DIR, domain)
-            if not os.path.isfile(cert_src):
-                skipped.append({"domain": domain, "reason": "no_cert", "message": "Kein Zertifikat gefunden (evtl. noch nicht ausgestellt)"})
+            picked = pick_backup_cert(domain, traefik_certs)
+            if not picked:
+                skipped.append({"domain": domain, "reason": "no_cert",
+                                "message": "Kein gueltiges Zertifikat (weder Traefik noch netbird-proxy)"})
                 continue
-            with open(cert_src, "r", encoding="utf-8", errors="replace") as f:
-                privkey, fullchain = split_cert_bundle(f.read())
-            if not privkey or not fullchain:
-                skipped.append({"domain": domain, "reason": "no_cert", "message": "Zertifikatsdatei unvollstaendig (Key oder Kette fehlt)"})
-                continue
+            cert_source, privkey, fullchain, not_after = picked
+            cert_info[domain] = (cert_source, not_after.strftime("%Y-%m-%dT%H:%M:%SZ"))
 
             domain_dir = os.path.join(workdir, domain)
             os.mkdir(domain_dir, 0o755)
@@ -1547,6 +1626,12 @@ def run_backup_sync(triggered_by):
         if BACKUP_SYNC_REMOTE_CMD:
             _run_cmd(ssh_cmd + [remote, BACKUP_SYNC_REMOTE_CMD], output, timeout=180)
         message = f"{len(synced)} synchronisiert, {len(skipped)} uebersprungen"
+        soon = sorted(d for d, (_, na) in cert_info.items()
+                      if datetime.fromisoformat(na.replace("Z", "+00:00")) - datetime.now(timezone.utc)
+                      < timedelta(days=BACKUP_SYNC_CERT_WARN_DAYS))
+        if soon:
+            status = "warn"
+            message += f"; Zertifikat laeuft in < {BACKUP_SYNC_CERT_WARN_DAYS} Tagen ab: " + ", ".join(soon)
     except BackupSyncError as exc:
         status, message = "error", str(exc)
         output.append("FEHLER: " + message)
@@ -1564,11 +1649,15 @@ def run_backup_sync(triggered_by):
 
     with _db_lock:
         conn = get_conn()
-        if status == "ok":
+        if status in ("ok", "warn"):
             conn.executemany(
-                "UPDATE backup_sync_domains SET last_synced_at = ?, last_status = 'ok', last_message = NULL WHERE domain = ?",
-                [(finished_at, d) for d in synced],
+                "UPDATE backup_sync_domains SET last_synced_at = ?, last_status = 'ok', last_message = NULL, "
+                "cert_source = ?, cert_not_after = ? WHERE domain = ?",
+                [(finished_at, cert_info[d][0], cert_info[d][1], d) for d in synced],
             )
+            # Der Lauf hat den kompletten Stand per rsync --delete uebertragen: nicht mehr
+            # in NetBird vorhandene Domains sind damit auch auf dem Backup weg.
+            conn.execute("DELETE FROM backup_sync_domains WHERE in_netbird = 0")
         else:
             # Nichts (vollstaendig) uebertragen - die vorbereiteten Domains als
             # fehlgeschlagen markieren, last_synced_at bleibt beim letzten Erfolg.
@@ -1586,7 +1675,7 @@ def run_backup_sync(triggered_by):
                 skipped_domains = ?, message = ?, output = ?
             WHERE id = ?
             """,
-            (finished_at, status, json.dumps(synced) if status == "ok" else json.dumps([]),
+            (finished_at, status, json.dumps(synced) if status in ("ok", "warn") else json.dumps([]),
              json.dumps(skipped), message, output_text, run_id),
         )
         conn.execute(
@@ -1598,7 +1687,7 @@ def run_backup_sync(triggered_by):
 
     with _backup_sync_state_lock:
         _backup_sync_state.update(running=False, run_id=None)
-    (log.info if status == "ok" else log.error)("Backup-Proxy-Sync (%s): %s", triggered_by, message)
+    {"ok": log.info, "warn": log.warning}.get(status, log.error)("Backup-Proxy-Sync (%s): %s", triggered_by, message)
 
 
 def backup_sync_loop():
@@ -2797,7 +2886,7 @@ def api_backup_sync_status():
     domains = [dict(r) for r in conn.execute(
         """
         SELECT domain, service_id, sync_enabled, in_netbird, target, first_seen_at,
-               last_seen_at, last_synced_at, last_status, last_message
+               last_seen_at, last_synced_at, last_status, last_message, cert_source, cert_not_after
         FROM backup_sync_domains
         ORDER BY in_netbird DESC, domain ASC
         """

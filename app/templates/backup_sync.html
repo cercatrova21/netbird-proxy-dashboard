@@ -152,7 +152,8 @@
       <div class="stat"><div class="k">Ziel</div><div class="v mono" id="s-target" style="font-family:var(--mono);font-size:12px">–</div></div>
     </div>
     <p class="hint">
-      Synchronisiert alle aktiven NetBird-Reverse-Proxy-Services (Domain, Backend-Ziel, Zertifikat) auf den Backup-Proxy
+      Synchronisiert alle aktiven NetBird-Reverse-Proxy-Services (Domain, Backend-Ziel, Zertifikat) auf den Backup-Proxy.
+      Als Zertifikat wird pro Domain das neueste gültige aus Traefik (Domains hinter BunkerWeb) oder netbird-proxy übertragen
       und erzeugt dort die nginx-Konfiguration neu. Eine vom Sync ausgeschlossene Domain wird beim nächsten Lauf
       <b>vom Backup-Proxy entfernt</b>. Neue Domains aus NetBird werden standardmässig synchronisiert.
     </p>
@@ -174,10 +175,11 @@
             <th>Domain</th>
             <th class="hide-sm">Backend</th>
             <th>Zuletzt synchronisiert</th>
+            <th>Zertifikat</th>
             <th>Status</th>
           </tr>
         </thead>
-        <tbody id="domains-body"><tr><td colspan="5" class="muted">lade…</td></tr></tbody>
+        <tbody id="domains-body"><tr><td colspan="6" class="muted">lade…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -198,7 +200,7 @@
             <th>Meldung</th>
           </tr>
         </thead>
-        <tbody id="runs-body"><tr><td colspan="5" class="muted">lade…</td></tr></tbody>
+        <tbody id="runs-body"><tr><td colspan="6" class="muted">lade…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -254,6 +256,7 @@ function statusPill(code, title){
 
 function runPill(run){
   if(run.status === "running") return `<span class="pill running">Läuft…</span>`;
+  if(run.status === "warn") return `<span class="pill warn" title="${esc(run.message || "")}">Warnung</span>`;
   return run.status === "ok" ? `<span class="pill ok">OK</span>` : `<span class="pill error">Fehler</span>`;
 }
 
@@ -297,11 +300,11 @@ function renderDomains(){
 
   const rows = state.domains.filter(d => !q || d.domain.includes(q) || (d.target || "").toLowerCase().includes(q));
   if(!state.domains.length){
-    body.innerHTML = `<tr><td colspan="5" class="muted">Noch keine Domains bekannt – sie erscheinen nach dem ersten Sync-Lauf.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="6" class="muted">Noch keine Domains bekannt – sie erscheinen nach dem ersten Sync-Lauf.</td></tr>`;
     return;
   }
   if(!rows.length){
-    body.innerHTML = `<tr><td colspan="5" class="muted">Keine Treffer</td></tr>`;
+    body.innerHTML = `<tr><td colspan="6" class="muted">Keine Treffer</td></tr>`;
     return;
   }
   body.innerHTML = rows.map(d => {
@@ -321,9 +324,19 @@ function renderDomains(){
       <td class="mono domain">${esc(d.domain)}</td>
       <td class="mono muted hide-sm">${esc(d.target || "–")}</td>
       <td>${d.last_synced_at ? `${esc(fmtTime(d.last_synced_at))}<br><span class="muted" style="font-size:11.5px">${esc(fmtRelative(d.last_synced_at))}</span>` : `<span class="muted">nie</span>`}</td>
+      <td>${certCell(d)}</td>
       <td>${statusPill(status, d.last_message)}${pending}</td>
     </tr>`;
   }).join("");
+}
+
+function certCell(d){
+  if(!d.cert_not_after || !d.sync_enabled || !d.in_netbird) return `<span class="muted">–</span>`;
+  const days = Math.floor((new Date(d.cert_not_after) - new Date()) / 86400000);
+  const cls = days < 0 ? "error" : days < 14 ? "warn" : "ok";
+  const src = {traefik: "Traefik", netbird: "NetBird"}[d.cert_source] || d.cert_source || "?";
+  return `<span class="pill ${cls}" title="Quelle: ${esc(src)} · gültig bis ${esc(fmtTime(d.cert_not_after))}">${days < 0 ? "abgelaufen" : days + " T"}</span>
+    <span class="muted" style="font-size:11.5px">${esc(src)}</span>`;
 }
 
 function renderRunDetail(run){
@@ -334,7 +347,7 @@ function renderRunDetail(run){
   const skipped = run.skipped_domains.length
     ? run.skipped_domains.map(x => `<span class="pill ${(STATUS_LABELS[x.reason]||["muted"])[0]}" title="${esc(x.message)}">${esc(x.domain)}</span>`).join("")
     : `<span class="muted">keine</span>`;
-  return `<tr class="detail"><td colspan="5"><div class="detail">
+  return `<tr class="detail"><td colspan="6"><div class="detail">
     <h3>Synchronisiert (${run.synced_domains.length})</h3><div class="domain-list">${synced}</div>
     <h3>Übersprungen (${run.skipped_domains.length})</h3><div class="domain-list">${skipped}</div>
     <h3>Log</h3><pre>${d ? esc(d.output || "(leer)") : "lade…"}</pre>
@@ -344,7 +357,7 @@ function renderRunDetail(run){
 function renderRuns(){
   const body = document.getElementById("runs-body");
   if(!state.runs.length){
-    body.innerHTML = `<tr><td colspan="5" class="muted">Noch keine Läufe.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="6" class="muted">Noch keine Läufe.</td></tr>`;
     return;
   }
   body.innerHTML = state.runs.map(r => {
@@ -380,7 +393,7 @@ function schedulePoll(){
     await loadStatus();
     if(wasBusy && !(state.running || state.queued)){
       const last = state.runs[0];
-      if(last) setActionStatus(last.status === "ok" ? "Sync abgeschlossen." : "Sync fehlgeschlagen – siehe Verlauf.", last.status === "ok" ? "ok" : "error");
+      if(last) setActionStatus(last.status === "ok" ? "Sync abgeschlossen." : last.status === "warn" ? "Sync abgeschlossen – mit Warnung (siehe Verlauf)." : "Sync fehlgeschlagen – siehe Verlauf.", last.status === "ok" ? "ok" : last.status === "warn" ? "info" : "error");
     }
   }, busy ? 2000 : 30000);
 }

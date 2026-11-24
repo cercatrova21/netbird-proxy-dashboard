@@ -48,6 +48,10 @@ services:
       # rsync/ssh auf den Backup-Proxy. Ohne BACKUP_SYNC_HOST bleibt beides ungenutzt.
       - ${BACKUP_SYNC_HOST_CERT_DIR:-/var/lib/docker/volumes/root_netbird_proxy_certs/_data}:/backup-sync/certs:ro
       - ${BACKUP_SYNC_HOST_SSH_KEY:-/root/.ssh/backup-proxy-sync}:/backup-sync/ssh_key:ro
+      # Traefik-Zertifikate (acme.json, nur lesend): Domains hinter BunkerWeb haben ihr
+      # oeffentliches Zertifikat von Traefik - der Backup-Sync nimmt pro Domain das
+      # neueste gueltige aus Traefik oder netbird-proxy.
+      - ${BACKUP_SYNC_HOST_TRAEFIK_ACME:-/var/lib/docker/volumes/root_netbird_traefik_letsencrypt/_data/acme.json}:/backup-sync/acme.json:ro
       # Domain-Verwaltung: BunkerWeb-Compose (Sites-Datei schreiben, bw-scheduler per
       # docker-compose neu erstellen), Traefik-Datei (Router pro Domain, wird in place
       # geschrieben) und das docker-compose-Binary des Hosts (statisch gelinkt, gleiche
