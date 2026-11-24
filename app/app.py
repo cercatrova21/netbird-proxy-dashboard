@@ -103,6 +103,34 @@ BACKUP_SYNC_INTERVAL_MINUTES = max(1, int(os.environ.get("BACKUP_SYNC_INTERVAL_M
 BACKUP_SYNC_CONFIGURED = bool(BACKUP_SYNC_HOST and NB_API_BASE and NB_API_TOKEN)
 BACKUP_SYNC_RUNS_KEEP = 2000  # aelteste Laufprotokolle darueber hinaus werden verworfen
 
+# --- BunkerWeb (optional) ---
+# Fuer Domains, bei denen BunkerWeb (WAF) VOR netbird-proxy haengt
+# (Traefik -> BunkerWeb -> netbird-proxy), sieht NetBird als Quell-IP nur noch
+# BunkerWeb selbst (BUNKERWEB_PROXY_IP). Ist beides gesetzt, liest das Dashboard
+# das Access-/Error-Log des BunkerWeb-Containers ueber den Docker-Socket, ordnet
+# jedes NetBird-Event dem passenden BunkerWeb-Request zu (Host+Methode+Pfad,
+# Zeitabstand < BUNKERWEB_MATCH_WINDOW_SECONDS) und ersetzt die BunkerWeb-IP durch
+# die echte Client-IP inkl. Land/Stadt/ASN. Requests, die BunkerWeb selbst
+# beantwortet (WAF, Methoden, Rate-Limit, CrowdSec, Backend down...) erreichen
+# NetBird nie - die werden als eigene Events ("BunkerWeb: <Grund>") eingefuegt.
+# Erst nach der Zuordnung gehen Deny-Events als security_event-Zeile an CrowdSec,
+# damit dort die echte IP und nicht die (gewhitelistete) BunkerWeb-IP landet.
+BUNKERWEB_CONTAINER_NAME = os.environ.get("BUNKERWEB_CONTAINER_NAME", "").strip()
+BUNKERWEB_PROXY_IP = os.environ.get("BUNKERWEB_PROXY_IP", "").strip()
+BUNKERWEB_ENABLED = bool(BUNKERWEB_CONTAINER_NAME and BUNKERWEB_PROXY_IP)
+BUNKERWEB_MATCH_WINDOW_SECONDS = float(os.environ.get("BUNKERWEB_MATCH_WINDOW_SECONDS", "2"))
+# Wie lange ein BunkerWeb-Request auf sein NetBird-Event warten darf, bevor er als
+# "von BunkerWeb selbst beantwortet" (blockiert / Backend nicht erreichbar) gilt.
+BUNKERWEB_ORPHAN_GRACE_SECONDS = int(os.environ.get("BUNKERWEB_ORPHAN_GRACE_SECONDS", "300"))
+
+# GeoLite2-City fuer Land/Stadt der echten Client-IPs hinter BunkerWeb (NetBird
+# liefert Geo-Daten nur fuer die IP, die es selbst sieht). Selber kostenloser
+# CrowdSec-Hub-Mirror wie die ASN-Datenbank; wird nur bei aktivem BunkerWeb geladen.
+GEOIP_CITY_MMDB_URL = os.environ.get(
+    "GEOIP_CITY_MMDB_URL", "https://hub-data.crowdsec.net/mmdb_update/GeoLite2-City.mmdb"
+)
+GEOIP_CITY_MMDB_PATH = os.path.join(os.path.dirname(DB_PATH) or ".", "GeoLite2-City.mmdb")
+
 if not NB_API_BASE or not NB_API_TOKEN:
     log.warning(
         "NB_API_BASE oder NB_API_TOKEN ist nicht gesetzt - der Poller kann keine Daten abrufen."
@@ -113,6 +141,11 @@ if ASN_ENRICHMENT_ENABLED:
     log.info("ASN-Anreicherung aktiviert - laedt bei Bedarf %s", ASN_MMDB_URL)
 if CROWDSEC_FP_NOTIFY_URL and CROWDSEC_FP_NOTIFY_TOKEN:
     log.info("CrowdSec-Fehlalarm-Benachrichtigung aktiviert -> %s", CROWDSEC_FP_NOTIFY_URL)
+if BUNKERWEB_ENABLED:
+    log.info(
+        "BunkerWeb-Integration aktiviert - Container %s, Proxy-IP %s",
+        BUNKERWEB_CONTAINER_NAME, BUNKERWEB_PROXY_IP,
+    )
 if BACKUP_SYNC_CONFIGURED:
     log.info(
         "Backup-Proxy-Sync aktiviert -> %s@%s:%s alle %d Min.",
@@ -293,6 +326,32 @@ def init_db():
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_backup_sync_runs_started ON backup_sync_runs(started_at)")
+    # BunkerWeb-Access-Log, eine Zeile pro Request (siehe BUNKERWEB_* oben).
+    # state: pending  = noch keinem NetBird-Event zugeordnet
+    #        matched  = event_id zeigt auf das angereicherte NetBird-Event
+    #        blocked  = nie bei NetBird angekommen, als eigenes Event event_id="bw-<request_id>" eingefuegt
+    #        orphan   = nie bei NetBird angekommen, aber Status < 400 (nicht eingefuegt)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bunkerweb_requests (
+            request_id TEXT PRIMARY KEY,
+            timestamp TEXT NOT NULL,
+            host TEXT,
+            client_ip TEXT,
+            method TEXT,
+            path TEXT,
+            status_code INTEGER,
+            bytes_download INTEGER,
+            referer TEXT,
+            user_agent TEXT,
+            block_reason TEXT,
+            event_id TEXT,
+            state TEXT NOT NULL DEFAULT 'pending'
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_bw_state_ts ON bunkerweb_requests(state, timestamp)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_bw_ts ON bunkerweb_requests(timestamp)")
     # Ein Lauf, der beim Container-Stop mitten drin abgebrochen wurde, bliebe sonst
     # fuer immer "running".
     conn.execute(
@@ -417,8 +476,15 @@ def insert_events(events):
         conn.close()
 
     for e in newly_inserted:
-        if e.get("reason"):
+        # Events mit der BunkerWeb-IP als Quelle erst nach der Zuordnung zur echten
+        # Client-IP loggen (siehe bunkerweb_correlate()), sonst sieht CrowdSec nur
+        # die gewhitelistete BunkerWeb-IP.
+        if e.get("reason") and not is_bunkerweb_source(e.get("source_ip")):
             log_security_event(e)
+
+
+def is_bunkerweb_source(ip):
+    return BUNKERWEB_ENABLED and ip == BUNKERWEB_PROXY_IP
 
 
 def backfill_asn_data():
@@ -484,11 +550,362 @@ def prune_old_events():
         conn = get_conn()
         cur = conn.execute("DELETE FROM proxy_events WHERE timestamp < ?", (cutoff,))
         deleted = cur.rowcount
+        conn.execute("DELETE FROM bunkerweb_requests WHERE timestamp < ?", (cutoff,))
         conn.commit()
         conn.close()
     set_sync_state("last_prune_at", now.isoformat())
     if deleted:
         log.info("Aufbewahrung: %d Events aelter als %d Tage geloescht", deleted, RETENTION_DAYS)
+
+
+# ---------------------------------------------------------------------------
+# BunkerWeb
+# ---------------------------------------------------------------------------
+
+# BunkerWeb-Default-log_format "logf", mit vorangestelltem Docker-Zeitstempel:
+#   $host $remote_addr - $request_id $remote_user [$time_local] "$request"
+#   $status $body_bytes_sent "$http_referer" "$http_user_agent"
+_BW_ACCESS_RE = re.compile(
+    r'^(?P<ts>\S+) (?P<host>\S+) (?P<ip>\S+) - (?P<rid>[0-9a-f]{32}) \S+ \[[^\]]*\] '
+    r'"(?P<request>[^"]*)" (?P<status>\d{3}) (?P<bytes>\d+) "(?P<referer>[^"]*)" "(?P<ua>[^"]*)"'
+)
+# nginx-Error-Log-Zeile mit Request-Kontext, z.B.
+#   2026/11/24 07:44:03 [warn] 1#1: *5 [ACCESS] denied access from misc : method POST is not
+#   allowed, client: 1.2.3.4, server: example.org, request: "POST /x HTTP/1.1", host: ...
+_BW_ERROR_RE = re.compile(
+    r'^(?P<ts>\S+) \d{4}/\d\d/\d\d \d\d:\d\d:\d\d \[(?:warn|error|crit|alert)\] [^*]*\*\d+ '
+    r'(?P<msg>.*?), client: (?P<ip>\S+), server: (?P<host>\S+), request: "(?P<request>[^"]*)"'
+)
+# Nur Meldungen, die eine Ablehnung beschreiben - keine DNSBL-Timeouts o.ae.
+_BW_BLOCK_MSG_RE = re.compile(r"denied|blocked|banned|is not allowed|limit (?:request|reached|conn)", re.I)
+_BW_MODSEC_MSG_RE = re.compile(r'\[msg "([^"]*)"\]')
+_BW_MODSEC_ID_RE = re.compile(r'\[id "(\d+)"\]')
+_BW_INTERNAL_HOSTS = {"bwapi", "_", "-"}
+
+# Block-Gruende aus dem Error-Log, bis die zugehoerige Access-Zeile kommt:
+# (client_ip, host, request_line) -> [(datetime, kind, text), ...]
+#   kind "block"    = BunkerWeb-eigene Ablehnung (Methode, Blacklist, Ban, ...)
+#   kind "waf_rule" = ausgeloeste CRS-Regel (ModSecurity-Warning, "<msg> (<id>)")
+#   kind "waf_deny" = endgueltige WAF-Ablehnung (949110, ohne eigenen Text)
+_bw_pending_reasons = defaultdict(list)
+_bw_status = {"last_run_at": None, "last_error": None}
+
+
+def _bw_ts(ts):
+    """Docker-Zeitstempel (RFC3339, Nanosekunden) -> aware datetime."""
+    return datetime.fromisoformat(ts)
+
+
+def _bw_classify(msg):
+    """Error-Log-Meldung -> (kind, text) oder None, falls irrelevant."""
+    if "ModSecurity:" in msg:
+        if "Access denied" in msg:
+            return "waf_deny", None
+        rule_msg = _BW_MODSEC_MSG_RE.search(msg)
+        rule_id = _BW_MODSEC_ID_RE.search(msg)
+        if rule_msg and rule_msg.group(1):
+            return "waf_rule", rule_msg.group(1) + (f" ({rule_id.group(1)})" if rule_id else "")
+        return None
+    if not _BW_BLOCK_MSG_RE.search(msg):
+        return None
+    # Variable Teile entfernen, damit gleiche Gruende in der Statistik zusammenfallen.
+    text = re.sub(r"^\[\w+\]\s*", "", msg)
+    text = re.sub(r"^denied access from (\w+) : ", r"\1: ", text)
+    text = re.sub(r"^misc: ", "", text)
+    text = re.sub(r"IP \S+ is banned with reason (.+?) \([\d.]+s remaining\)", r"banned (\1)", text)
+    text = text.replace("(?:\\b)", "").replace("cached ", "")
+    text = re.sub(r"client IP \S+ is in DNSBL cache \(server = ([^)]*)\)", r"IP is blacklisted by \1", text)
+    text = text.replace(" is in blacklist", " is blacklisted")
+    text = re.sub(r"\s*\(info : ip\)", "", text)
+    text = re.sub(r"\(info : (.*)\)", r"(\1)", text)
+    return "block", ("BunkerWeb: " + text)[:160]
+
+
+def _bw_split_request(request_line):
+    parts = request_line.split(" ")
+    if len(parts) >= 2:
+        return parts[0], parts[1].split("?", 1)[0]
+    return None, request_line or None
+
+
+def bunkerweb_ingest_logs():
+    """Liest neue Log-Zeilen des BunkerWeb-Containers seit dem letzten Lauf und
+    legt Access-Zeilen in bunkerweb_requests ab (dedupliziert per request_id,
+    deshalb darf sich das Zeitfenster ueberlappen). Gibt die Anzahl neuer Zeilen zurueck."""
+    client = docker_sdk.from_env()
+    try:
+        container = client.containers.get(BUNKERWEB_CONTAINER_NAME)
+        since_state = get_sync_state("bunkerweb_log_since")
+        # Docker filtert "since" nur sekundengenau -> 2s Ueberlappung, Duplikate fliegen per request_id raus.
+        since = int(_bw_ts(since_state).timestamp()) - 2 if since_state else None
+        kwargs = {"stdout": True, "stderr": True, "timestamps": True}
+        if since:
+            kwargs["since"] = since
+        rows = []
+        newest = since_state
+        for line in container.logs(**kwargs).decode("utf-8", "replace").splitlines():
+            m = _BW_ACCESS_RE.match(line)
+            if m:
+                if m["host"] in _BW_INTERNAL_HOSTS:
+                    continue
+                method, path = _bw_split_request(m["request"])
+                rows.append((
+                    m["rid"], m["ts"], m["host"], m["ip"], method, path, int(m["status"]),
+                    int(m["bytes"]), m["referer"], m["ua"], m["request"],
+                ))
+                newest = m["ts"]
+                continue
+            m = _BW_ERROR_RE.match(line)
+            if m:
+                classified = _bw_classify(m["msg"])
+                if classified:
+                    key = (m["ip"], m["host"], m["request"])
+                    _bw_pending_reasons[key].append((_bw_ts(m["ts"]),) + classified)
+    finally:
+        client.close()
+
+    inserted = 0
+    with _db_lock:
+        conn = get_conn()
+        for (rid, ts, host, ip, method, path, status, nbytes, referer, ua, request_line) in rows:
+            reason = _bw_take_reason(ip, host, request_line, _bw_ts(ts))
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO bunkerweb_requests (
+                    request_id, timestamp, host, client_ip, method, path, status_code,
+                    bytes_download, referer, user_agent, block_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (rid, ts, host, ip, method, path, status, nbytes, referer, ua, reason),
+            )
+            inserted += cur.rowcount
+        conn.commit()
+        conn.close()
+    if newest and newest != since_state:
+        set_sync_state("bunkerweb_log_since", newest)
+
+    # Gruende, deren Access-Zeile nie kam (z.B. reine Warnungen), nicht ewig horten.
+    horizon = datetime.now(timezone.utc) - timedelta(minutes=5)
+    for key in list(_bw_pending_reasons):
+        _bw_pending_reasons[key] = [r for r in _bw_pending_reasons[key] if r[0] >= horizon]
+        if not _bw_pending_reasons[key]:
+            del _bw_pending_reasons[key]
+    return inserted
+
+
+def _bw_take_reason(ip, host, request_line, ts):
+    candidates = _bw_pending_reasons.get((ip, host, request_line))
+    if not candidates:
+        return None
+    near = [r for r in candidates if abs((r[0] - ts).total_seconds()) <= BUNKERWEB_MATCH_WINDOW_SECONDS]
+    blocks = [text for _, kind, text in near if kind == "block"]
+    if blocks:
+        return blocks[-1]
+    if any(kind == "waf_deny" for _, kind, _ in near):
+        # Die Ablehnung selbst (949110) hat keinen Text - die erste ausgeloeste
+        # Angriffsregel sagt, worum es ging.
+        rules = [text for _, kind, text in near if kind == "waf_rule"]
+        if not rules:
+            return "BunkerWeb WAF: Anomaly Score überschritten"
+        return f"BunkerWeb WAF: {rules[0]}" + (f" +{len(rules) - 1}" if len(rules) > 1 else "")
+    return None
+
+
+def bunkerweb_correlate():
+    """Ordnet NetBird-Events mit Quell-IP BUNKERWEB_PROXY_IP den BunkerWeb-Requests
+    zu und reichert sie an; fuegt von BunkerWeb selbst beantwortete Requests als
+    eigene Events ein. Gibt (matched, blocked) zurueck."""
+    window = timedelta(seconds=BUNKERWEB_MATCH_WINDOW_SECONDS)
+    now = datetime.now(timezone.utc)
+    to_log = []
+    matched = blocked = 0
+    with _db_lock:
+        conn = get_conn()
+        pending = conn.execute(
+            "SELECT * FROM bunkerweb_requests WHERE state = 'pending' ORDER BY timestamp"
+        ).fetchall()
+        if not pending:
+            conn.close()
+            return 0, 0
+        lo = _format_ts_with_millis(_bw_ts(pending[0]["timestamp"]) - window - timedelta(seconds=1))
+        hi = _format_ts_with_millis(_bw_ts(pending[-1]["timestamp"]) + window + timedelta(seconds=1))
+        events = conn.execute(
+            """
+            SELECT id, timestamp, host, method, path, reason, status_code, user_id, metadata
+            FROM proxy_events WHERE source_ip = ? AND timestamp >= ? AND timestamp <= ?
+            ORDER BY timestamp
+            """,
+            (BUNKERWEB_PROXY_IP, lo, hi),
+        ).fetchall()
+
+        by_key = defaultdict(list)
+        for p in pending:
+            by_key[(p["host"], p["method"], p["path"])].append(p)
+        used = set()
+        for ev in events:
+            ev_ts = _bw_ts(ev["timestamp"])
+            best = None
+            for p in by_key.get((ev["host"], ev["method"], ev["path"]), ()):
+                if p["request_id"] in used:
+                    continue
+                diff = abs(_bw_ts(p["timestamp"]) - ev_ts)
+                if diff <= window and (best is None or diff < best[0]):
+                    best = (diff, p)
+            if not best:
+                continue
+            p = best[1]
+            used.add(p["request_id"])
+            country, city, subdivision = lookup_geo(p["client_ip"])
+            as_number, as_name = lookup_asn(p["client_ip"])
+            meta = {}
+            if ev["metadata"]:
+                try:
+                    meta = json.loads(ev["metadata"]) or {}
+                except ValueError:
+                    meta = {}
+            meta["bunkerweb"] = {"request_id": p["request_id"], "user_agent": p["user_agent"]}
+            conn.execute(
+                """
+                UPDATE proxy_events SET source_ip = ?, country_code = ?, city_name = ?,
+                    subdivision_code = ?, as_number = ?, as_name = ?, metadata = ?
+                WHERE id = ?
+                """,
+                (p["client_ip"], country, city, subdivision, as_number, as_name, json.dumps(meta), ev["id"]),
+            )
+            conn.execute(
+                "UPDATE bunkerweb_requests SET state = 'matched', event_id = ? WHERE request_id = ?",
+                (ev["id"], p["request_id"]),
+            )
+            matched += 1
+            if ev["reason"]:
+                to_log.append({
+                    "timestamp": ev["timestamp"], "source_ip": p["client_ip"], "host": ev["host"], "method": ev["method"],
+                    "path": ev["path"], "status_code": ev["status_code"], "reason": ev["reason"],
+                    "user_id": ev["user_id"],
+                })
+
+        # Was nach der Karenzzeit kein NetBird-Event bekommen hat, hat BunkerWeb
+        # selbst beantwortet (Block, oder netbird-proxy nicht erreichbar).
+        grace_cutoff = now - timedelta(seconds=BUNKERWEB_ORPHAN_GRACE_SECONDS)
+        service_ids = {}
+        for p in pending:
+            if p["request_id"] in used:
+                continue
+            # Mit erkanntem Block-Grund steht fest, dass NetBird den Request nie
+            # gesehen hat -> sofort einfuegen; sonst erst nach der Karenzzeit.
+            if not p["block_reason"] and _bw_ts(p["timestamp"]) > grace_cutoff:
+                continue
+            if p["status_code"] < 400:
+                conn.execute("UPDATE bunkerweb_requests SET state = 'orphan' WHERE request_id = ?", (p["request_id"],))
+                continue
+            if p["host"] not in service_ids:
+                row = conn.execute(
+                    "SELECT service_id FROM proxy_events WHERE host = ? AND service_id IS NOT NULL "
+                    "ORDER BY timestamp DESC LIMIT 1",
+                    (p["host"],),
+                ).fetchone()
+                service_ids[p["host"]] = row["service_id"] if row else None
+            reason = p["block_reason"] or f"BunkerWeb: Fehler {p['status_code']}"
+            country, city, subdivision = lookup_geo(p["client_ip"])
+            as_number, as_name = lookup_asn(p["client_ip"])
+            event_id = "bw-" + p["request_id"]
+            meta = {"bunkerweb": {"request_id": p["request_id"], "user_agent": p["user_agent"], "blocked": True}}
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO proxy_events (
+                    id, service_id, timestamp, method, host, path, status_code, source_ip, reason,
+                    country_code, city_name, subdivision_code, bytes_download, protocol, metadata,
+                    as_number, as_name
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'http', ?, ?, ?)
+                """,
+                (
+                    event_id, service_ids[p["host"]], p["timestamp"], p["method"], p["host"], p["path"],
+                    p["status_code"], p["client_ip"], reason, country, city, subdivision,
+                    p["bytes_download"], json.dumps(meta), as_number, as_name,
+                ),
+            )
+            conn.execute(
+                "UPDATE bunkerweb_requests SET state = 'blocked', event_id = ? WHERE request_id = ?",
+                (event_id, p["request_id"]),
+            )
+            blocked += 1
+            to_log.append({
+                "timestamp": p["timestamp"], "source_ip": p["client_ip"], "host": p["host"], "method": p["method"], "path": p["path"],
+                "status_code": p["status_code"], "reason": reason, "user_id": None,
+            })
+        conn.commit()
+        conn.close()
+
+    # Nur frische Events an CrowdSec: beim ersten Lauf (Backfill ueber Stunden) wuerden
+    # sonst alte Denies gebuendelt in Sekunden ankommen und Flood-Szenarien ausloesen.
+    log_cutoff = _format_ts_with_millis(now - timedelta(seconds=BUNKERWEB_ORPHAN_GRACE_SECONDS + 600))
+    for e in to_log:
+        if e["timestamp"] >= log_cutoff:
+            log_security_event(e)
+    return matched, blocked
+
+
+def bunkerweb_sync():
+    if not BUNKERWEB_ENABLED:
+        return
+    try:
+        ingested = bunkerweb_ingest_logs()
+        matched, blocked = bunkerweb_correlate()
+        _bw_status["last_run_at"] = _now_iso()
+        _bw_status["last_error"] = None
+        if matched or blocked:
+            log.info(
+                "BunkerWeb: %d neue Log-Zeilen, %d NetBird-Events mit echter IP angereichert, "
+                "%d von BunkerWeb beantwortete Requests eingefuegt",
+                ingested, matched, blocked,
+            )
+    except Exception as exc:
+        _bw_status["last_error"] = str(exc)
+        log.exception("BunkerWeb-Sync fehlgeschlagen")
+
+
+_city_reader = None
+_city_reader_lock = threading.Lock()
+
+
+def ensure_city_db():
+    if not BUNKERWEB_ENABLED:
+        return
+    try:
+        if _refresh_mmdb(GEOIP_CITY_MMDB_URL, GEOIP_CITY_MMDB_PATH):
+            global _city_reader
+            with _city_reader_lock:
+                _city_reader = None
+            log.info("GeoIP-City-Datenbank aktualisiert (%s)", GEOIP_CITY_MMDB_URL)
+    except Exception:
+        log.exception("GeoIP-City-Datenbank konnte nicht aktualisiert werden")
+
+
+def lookup_geo(ip):
+    """(country_code, city_name, subdivision_code) im selben Format wie NetBird,
+    sonst (None, None, None)."""
+    global _city_reader
+    if not ip or is_private_ip(ip) or is_netbird_mesh_ip(ip):
+        return None, None, None
+    with _city_reader_lock:
+        if _city_reader is None and os.path.exists(GEOIP_CITY_MMDB_PATH):
+            try:
+                _city_reader = maxminddb.open_database(GEOIP_CITY_MMDB_PATH)
+            except Exception:
+                log.exception("GeoIP-City-Datenbank konnte nicht geoeffnet werden")
+                _city_reader = False
+        reader = _city_reader or None
+    if not reader:
+        return None, None, None
+    try:
+        r = reader.get(ip) or {}
+    except (ValueError, maxminddb.InvalidDatabaseError):
+        return None, None, None
+    country = (r.get("country") or r.get("registered_country") or {}).get("iso_code")
+    city = ((r.get("city") or {}).get("names") or {}).get("en")
+    subdivisions = r.get("subdivisions") or []
+    subdivision = subdivisions[0].get("iso_code") if subdivisions else None
+    return country, city, subdivision
 
 
 # ---------------------------------------------------------------------------
@@ -868,6 +1285,7 @@ def poller_loop():
                 poll_once()
             except Exception:
                 log.exception("Unerwarteter Fehler im Poller")
+        bunkerweb_sync()  # nach poll_once(), damit die neuen NetBird-Events schon da sind
         try:
             sync_crowdsec()
         except Exception:
@@ -882,6 +1300,7 @@ def poller_loop():
             log.exception("Unerwarteter Fehler beim Pruning")
         try:
             ensure_asn_db()  # No-op fast path, prueft nur den mtime der lokalen Datei
+            ensure_city_db()
         except Exception:
             log.exception("Unerwarteter Fehler bei der ASN-Datenbank-Aktualisierung")
         time.sleep(POLL_INTERVAL_SECONDS)
@@ -1370,27 +1789,29 @@ def ensure_asn_db():
     if not ASN_ENRICHMENT_ENABLED:
         return
     try:
-        needs_download = not os.path.exists(ASN_MMDB_PATH)
-        if not needs_download:
-            age_seconds = time.time() - os.path.getmtime(ASN_MMDB_PATH)
-            needs_download = age_seconds >= ASN_REFRESH_INTERVAL_SECONDS
-        if not needs_download:
+        if not _refresh_mmdb(ASN_MMDB_URL, ASN_MMDB_PATH):
             return
-
-        tmp_path = ASN_MMDB_PATH + ".tmp"
-        resp = requests.get(ASN_MMDB_URL, timeout=60)
-        resp.raise_for_status()
-        with open(tmp_path, "wb") as f:
-            f.write(resp.content)
-
-        maxminddb.open_database(tmp_path).close()  # wirft bei kaputter/unvollstaendiger Datei
-        os.replace(tmp_path, ASN_MMDB_PATH)  # atomar - ueberschreibt eine funktionierende Datei nur nach Erfolg
         global _asn_reader
         with _asn_reader_lock:
             _asn_reader = None  # naechster lookup_asn() oeffnet die frische Datei neu
         log.info("ASN-Datenbank aktualisiert (%s)", ASN_MMDB_URL)
     except Exception:
         log.exception("ASN-Datenbank konnte nicht aktualisiert werden - ASN-Anreicherung bleibt ggf. inaktiv")
+
+
+def _refresh_mmdb(url, path):
+    """Laedt eine mmdb nach `path`, falls sie fehlt oder aelter als
+    ASN_REFRESH_INTERVAL_SECONDS ist. True = neue Datei liegt bereit."""
+    if os.path.exists(path) and time.time() - os.path.getmtime(path) < ASN_REFRESH_INTERVAL_SECONDS:
+        return False
+    tmp_path = path + ".tmp"
+    resp = requests.get(url, timeout=120)
+    resp.raise_for_status()
+    with open(tmp_path, "wb") as f:
+        f.write(resp.content)
+    maxminddb.open_database(tmp_path).close()  # wirft bei kaputter/unvollstaendiger Datei
+    os.replace(tmp_path, path)  # atomar - ueberschreibt eine funktionierende Datei nur nach Erfolg
+    return True
 
 
 def _get_asn_reader():
@@ -1981,9 +2402,12 @@ def api_events():
         e["city_name"] = label_city(e["city_name"], e["source_ip"])
         metadata = e.pop("metadata")
         e["crowdsec_verdict"] = None
+        e["bunkerweb"] = None
         if metadata:
             try:
-                e["crowdsec_verdict"] = json.loads(metadata).get("crowdsec_verdict")
+                meta = json.loads(metadata)
+                e["crowdsec_verdict"] = meta.get("crowdsec_verdict")
+                e["bunkerweb"] = meta.get("bunkerweb")
             except (ValueError, AttributeError):
                 pass
         events.append(e)
@@ -2478,12 +2902,16 @@ def api_poller_status():
         db_size_bytes=db_size_bytes,
         crowdsec_configured=CROWDSEC_CONFIGURED,
         crowdsec_lag_seconds=crowdsec_lag_seconds,
+        bunkerweb_enabled=BUNKERWEB_ENABLED,
+        bunkerweb_last_run_at=_bw_status["last_run_at"],
+        bunkerweb_last_error=_bw_status["last_error"],
     )
 
 
 if __name__ == "__main__":
     init_db()
     ensure_asn_db()
+    ensure_city_db()
     threading.Thread(target=poller_loop, daemon=True).start()
     threading.Thread(target=backfill_asn_data, daemon=True).start()
     if BACKUP_SYNC_CONFIGURED:

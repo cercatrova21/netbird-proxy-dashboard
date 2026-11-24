@@ -1660,7 +1660,13 @@ async function loadEvents(){
       ? `<span class="badge ${denied ? 'deny' : (e.status_code < 400 ? 'ok' : 'warn')}">${e.status_code}</span>`
       : `<span class="badge">${escapeHtml(e.protocol || "")}</span>`;
     const hostCell = e.host ? `<span class="clickable" data-filter-key="host" data-filter-value="${escapeHtml(e.host)}">${escapeHtml(e.host)}</span>` : "";
-    const ipCell = e.source_ip ? `<span class="clickable" data-filter-key="ip" data-filter-value="${escapeHtml(e.source_ip)}">${escapeHtml(e.source_ip)}</span>` : "";
+    // Kam ueber BunkerWeb (WAF vor netbird-proxy): IP/Geo stammen aus dem BunkerWeb-Log.
+    const bwBadge = e.bunkerweb
+      ? ` <span class="badge ${e.bunkerweb.blocked ? 'deny' : 'info'}" title="${escapeHtml(
+          (e.bunkerweb.blocked ? "Von BunkerWeb beantwortet, nie bei NetBird angekommen" : "Über BunkerWeb – echte Client-IP aus dem BunkerWeb-Log")
+          + (e.bunkerweb.user_agent ? "\nUser-Agent: " + e.bunkerweb.user_agent : ""))}">BW</span>`
+      : "";
+    const ipCell = (e.source_ip ? `<span class="clickable" data-filter-key="ip" data-filter-value="${escapeHtml(e.source_ip)}">${escapeHtml(e.source_ip)}</span>` : "") + bwBadge;
     const countryCell = e.country_code ? `<span class="clickable" data-filter-key="country" data-filter-value="${escapeHtml(e.country_code)}">${countryLabel(e.country_code)}</span>` : "";
     const asnCell = asnCellHtml(e.as_number, e.as_name);
     const userCell = userCellHtml(e.user_id);

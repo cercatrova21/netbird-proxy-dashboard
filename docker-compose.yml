@@ -25,12 +25,15 @@ services:
       BACKUP_SYNC_DEST: ${BACKUP_SYNC_DEST:-/opt/backup-proxy/certs}
       BACKUP_SYNC_REMOTE_CMD: ${BACKUP_SYNC_REMOTE_CMD:-/opt/backup-proxy/regenerate-nginx.sh}
       BACKUP_SYNC_INTERVAL_MINUTES: ${BACKUP_SYNC_INTERVAL_MINUTES:-15}
+      BUNKERWEB_CONTAINER_NAME: ${BUNKERWEB_CONTAINER_NAME:-}
+      BUNKERWEB_PROXY_IP: ${BUNKERWEB_PROXY_IP:-}
       TZ: ${TZ:-Europe/Zurich}
     volumes:
       - ./data:/data
-      # Docker-Socket: nur fuer den expliziten "Anwenden"-Knopf im Whitelist-Widget,
+      # Docker-Socket: fuer den expliziten "Anwenden"-Knopf im Whitelist-Widget,
       # der netbird-logparser neu startet, damit eine geaenderte Whitelist-Datei
-      # geladen wird (CrowdSec liest Parser-Config nur beim Start neu ein).
+      # geladen wird (CrowdSec liest Parser-Config nur beim Start neu ein) - und,
+      # falls BUNKERWEB_CONTAINER_NAME gesetzt ist, zum Lesen der BunkerWeb-Logs.
       - /var/run/docker.sock:/var/run/docker.sock
       # Die lokale CrowdSec-Whitelist-Datei von netbird-logparser - hier kann das
       # Dashboard Eintraege hinzufuegen/entfernen (wirksam erst nach obigem Neustart).
