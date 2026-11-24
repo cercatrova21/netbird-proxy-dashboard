@@ -182,6 +182,28 @@
   .preset .pt{ font-weight:600; font-size:13px; }
   .preset .pd{ color:var(--muted); font-size:12px; margin-top:3px; line-height:1.45; }
 
+  /* Laenderauswahl */
+  .cpick{ border:1px solid var(--border); border-radius:8px; background:var(--panel-2); padding:6px; position:relative; }
+  .cpick:focus-within{ border-color:var(--info); }
+  .cpick .sel{ display:flex; flex-wrap:wrap; gap:5px; }
+  .cchip{ display:inline-flex; align-items:center; gap:6px; background:rgba(180,140,255,.12); border:1px solid rgba(180,140,255,.45); color:var(--text);
+          border-radius:999px; padding:3px 4px 3px 10px; font-size:12.5px; }
+  .cchip.block{ background:rgba(255,107,94,.1); border-color:rgba(255,107,94,.45); }
+  .cchip .cc{ font-family:var(--mono); font-size:10px; color:var(--muted); }
+  .cchip button{ background:none; border:none; color:var(--muted); cursor:pointer; font-size:14px; line-height:1; padding:0 4px; border-radius:50%; }
+  .cchip button:hover{ color:var(--deny); }
+  .cpick input{ border:none; background:transparent; padding:5px 6px; width:100%; font-family:var(--sans); font-size:13px; }
+  .cpick input:focus{ outline:none; }
+  .cpick .empty-note{ color:var(--muted); font-size:12px; padding:3px 6px; }
+  .cdrop{ position:absolute; left:-1px; right:-1px; top:100%; margin-top:3px; z-index:20; background:var(--panel-3); border:1px solid var(--info);
+          border-radius:8px; max-height:230px; overflow-y:auto; box-shadow:0 10px 30px rgba(0,0,0,.45); }
+  .cdrop div{ padding:6px 10px; cursor:pointer; font-size:13px; display:flex; justify-content:space-between; gap:10px; }
+  .cdrop div .cc{ font-family:var(--mono); font-size:11px; color:var(--muted); }
+  .cdrop div.act, .cdrop div:hover{ background:rgba(91,157,255,.15); }
+  .cquick{ display:flex; flex-wrap:wrap; gap:5px; margin-top:6px; }
+  .cquick button{ background:none; border:1px dashed var(--border); color:var(--muted); border-radius:999px; padding:2px 9px; font-size:11.5px; cursor:pointer; }
+  .cquick button:hover{ color:var(--text); border-color:var(--muted); }
+
   /* Settings-Tabelle */
   .stable{ width:100%; border-collapse:collapse; font-size:12px; }
   .stable td{ padding:3px 3px; vertical-align:top; border-bottom:1px solid rgba(34,48,65,.5); }
@@ -354,6 +376,57 @@ const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt
 const METHODS = ["GET","POST","HEAD","PUT","DELETE","PATCH","OPTIONS"];
 const FILTERS = [["all","Alle"],["bw","Über BunkerWeb"],["direct","Direkt (NetBird)"],["infra","Traefik intern"],["issues","Mit Hinweisen"],["off","Deaktiviert"]];
 
+const ISO_CODES = ("AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ "
+  + "DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT "
+  + "JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ "
+  + "OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ "
+  + "UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS XK YE YT ZA ZM ZW").split(" ");
+const REGION_NAMES = (() => { try{ return new Intl.DisplayNames(["de"], {type:"region"}); }catch(e){ return null; } })();
+function countryName(cc){ try{ return (REGION_NAMES && REGION_NAMES.of(cc)) || cc; }catch(e){ return cc; } }
+const COUNTRIES = ISO_CODES.map(cc => ({cc, name: countryName(cc)})).sort((a,b) => a.name.localeCompare(b.name, "de"));
+const QUICK_ALLOW = ["CH","LI","DE","AT","FR","IT"];
+const QUICK_BLOCK = ["RU","CN","KP","IR","BY"];
+function countryNames(list){ return list.map(countryName).join(", "); }
+const norm = t => t.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
+function countryPickerHtml(id, selected, kind){
+  const quick = (kind==="block" ? QUICK_BLOCK : QUICK_ALLOW).filter(cc => !selected.includes(cc));
+  return `<div class="cpick" id="${id}" data-kind="${kind}">
+    <div class="sel">${selected.map(cc => `<span class="cchip ${kind==="block"?"block":""}">${esc(countryName(cc))} <span class="cc">${esc(cc)}</span><button type="button" data-rm="${esc(cc)}" title="Entfernen">×</button></span>`).join("")}
+      ${selected.length ? "" : `<span class="empty-note">${kind==="block" ? "keine Sperren" : "alle Länder erlaubt"}</span>`}</div>
+    <input type="text" class="csearch" placeholder="Land suchen (z.B. Schweiz, Deutschland) …" autocomplete="off">
+    <div class="cdrop hidden"></div>
+  </div>
+  ${quick.length ? `<div class="cquick">${quick.map(cc => `<button type="button" data-pick="${id}" data-add="${cc}">+ ${esc(countryName(cc))}</button>`).join("")}</div>` : ""}`;
+}
+function bindCountryPicker(id, getList, setList, rerender){
+  const root = document.getElementById(id); if(!root) return;
+  const input = root.querySelector(".csearch"), drop = root.querySelector(".cdrop");
+  let act = 0, matches = [];
+  const add = cc => { const l = getList(); if(!l.includes(cc)){ setList([...l, cc]); } rerender(id); };
+  const show = () => {
+    const q = norm(input.value.trim()); const cur = getList();
+    matches = COUNTRIES.filter(c => !cur.includes(c.cc) && (!q || norm(c.name).includes(q) || c.cc.toLowerCase() === q)).slice(0, 60);
+    if(q) matches.sort((a,b) => (norm(b.name).startsWith(q) || b.cc.toLowerCase()===q) - (norm(a.name).startsWith(q) || a.cc.toLowerCase()===q));
+    act = Math.min(act, Math.max(0, matches.length-1));
+    drop.innerHTML = matches.length ? matches.map((c,k) => `<div data-cc="${c.cc}" class="${k===act?"act":""}">${esc(c.name)}<span class="cc">${c.cc}</span></div>`).join("") : `<div class="muted">kein Treffer</div>`;
+    drop.classList.remove("hidden");
+    drop.querySelectorAll("div[data-cc]").forEach(d => d.onmousedown = e => { e.preventDefault(); add(d.dataset.cc); });
+  };
+  input.addEventListener("focus", show);
+  input.addEventListener("input", () => { act = 0; show(); });
+  input.addEventListener("blur", () => setTimeout(() => drop.classList.add("hidden"), 120));
+  input.addEventListener("keydown", e => {
+    if(e.key === "ArrowDown"){ act = Math.min(act+1, matches.length-1); show(); e.preventDefault(); }
+    else if(e.key === "ArrowUp"){ act = Math.max(act-1, 0); show(); e.preventDefault(); }
+    else if(e.key === "Enter"){ if(matches[act]) add(matches[act].cc); e.preventDefault(); }
+    else if(e.key === "Escape"){ drop.classList.add("hidden"); e.stopPropagation(); }
+    else if(e.key === "Backspace" && !input.value){ const l = getList(); if(l.length){ setList(l.slice(0,-1)); rerender(id); } }
+  });
+  root.querySelectorAll("button[data-rm]").forEach(b => b.onclick = () => { setList(getList().filter(x => x !== b.dataset.rm)); rerender(); });
+  document.querySelectorAll(`button[data-pick="${id}"]`).forEach(b => b.onclick = () => add(b.dataset.add));
+}
+
 let S = { items:[], certs:{}, lookups:null, catalog:null, filter:"all", q:"", sel:null, form:null, orig:null, tab:"overview", polling:null };
 
 async function api(url, opts={}){
@@ -489,8 +562,8 @@ function badgesFor(i){
     if(a.pin_enabled) b.push(`<span class="badge pw">PIN</span>`);
     const co = i.countries || {allowed:[], blocked:[]};
     const by = co.enforced_by === "bunkerweb" ? "BunkerWeb" : "NetBird";
-    if(co.allowed.length) b.push(`<span class="badge geo" title="Nur aus diesen Ländern – durchgesetzt von ${by}">${esc(co.allowed.join(" "))}${co.enforced_by==="bunkerweb"?" ·BW":""}</span>`);
-    if(co.blocked.length) b.push(`<span class="badge geo" title="Gesperrte Länder – durchgesetzt von ${by}">¬${esc(co.blocked.join(" "))}${co.enforced_by==="bunkerweb"?" ·BW":""}</span>`);
+    if(co.allowed.length) b.push(`<span class="badge geo" title="Nur aus: ${esc(countryNames(co.allowed))} – durchgesetzt von ${by}">${esc(co.allowed.length<=3 ? countryNames(co.allowed) : co.allowed.join(" "))}${co.enforced_by==="bunkerweb"?" ·BW":""}</span>`);
+    if(co.blocked.length) b.push(`<span class="badge geo" title="Gesperrt: ${esc(countryNames(co.blocked))} – durchgesetzt von ${by}">¬${esc(co.blocked.length<=2 ? countryNames(co.blocked) : co.blocked.join(" "))}${co.enforced_by==="bunkerweb"?" ·BW":""}</span>`);
     if(ac.crowdsec_mode==="enforce") b.push(`<span class="badge cs" title="CrowdSec in netbird-proxy">CrowdSec</span>`);
     if(ac.crowdsec_mode==="observe") b.push(`<span class="badge" title="CrowdSec nur beobachten">CS observe</span>`);
     if(i.nb.enabled===false) b.push(`<span class="badge bad">deaktiviert</span>`);
@@ -657,7 +730,7 @@ function overviewHtml(i){
   if(i.route==="bunkerweb"){
     const b = i.bw;
     const co = i.countries || {allowed:[], blocked:[]};
-    const coTxt = (co.allowed.length ? "nur " + co.allowed.join(" ") : "alle") + (co.blocked.length ? " ohne " + co.blocked.join(" ") : "");
+    const coTxt = (co.allowed.length ? "nur " + countryNames(co.allowed) : "alle") + (co.blocked.length ? ", gesperrt: " + countryNames(co.blocked) : "");
     st.push(["BunkerWeb", b ? `<div class="box" style="border-color:rgba(61,220,151,.55)"><b>${esc(wafLabel(b.waf))}</b> · Länder ${esc(coTxt)} · Methoden ${esc(b.methods)} · Rate ${esc(b.rate)}${b.whitelist?`<div class="m">Whitelist: ${esc(b.whitelist)}</div>`:""}${b.note?`<div class="m">${esc(b.note)}</div>`:""}<div class="m">CrowdSec-Bouncer, Bad-Behavior, Blacklists, DNSBL, Limits aktiv</div></div>` : `<div class="box" style="border-color:var(--deny)"><b>Keine Site konfiguriert!</b></div>`]);
   }
   if(i.nb){
@@ -667,7 +740,7 @@ function overviewHtml(i){
     if(n.auth.password_enabled) acc.push("Passwort");
     if(n.auth.pin_enabled) acc.push("PIN");
     st.push(["NetBird", `<div class="box" style="border-color:rgba(242,184,75,.5)"><b>netbird-proxy</b> · ${n.enabled===false?'<span style="color:var(--deny)">deaktiviert</span>':"aktiv"} · Status ${esc(n.status||"–")}
-      <div class="m">Zugriff: ${esc(acc.join(", ")||"öffentlich")} · Länder (in NetBird): ${esc(n.access.allowed_countries.join(" ")||"alle")}${n.access.blocked_countries.length?" ohne "+esc(n.access.blocked_countries.join(" ")):""} · CrowdSec: ${esc(n.access.crowdsec_mode)}${i.route==="bunkerweb"?" (hinter BunkerWeb wirkungslos)":""}</div>
+      <div class="m">Zugriff: ${esc(acc.join(", ")||"öffentlich")} · Länder (in NetBird): ${esc(n.access.allowed_countries.length ? countryNames(n.access.allowed_countries) : "alle")}${n.access.blocked_countries.length?", gesperrt: "+esc(countryNames(n.access.blocked_countries)):""} · CrowdSec: ${esc(n.access.crowdsec_mode)}${i.route==="bunkerweb"?" (hinter BunkerWeb wirkungslos)":""}</div>
       <div class="m">→ WireGuard-Tunnel</div></div>`]);
     st.push(["Backend", `<div class="box" style="border-color:rgba(180,140,255,.45)"><b>${esc(targetLabel(n.target))}</b><div class="m">${esc(typeLabel(n.target.target_type))}${n.targets_count>1?` · ${n.targets_count} Targets`:""}${n.target.skip_tls_verify?" · Backend-Zertifikat wird nicht geprüft":""}</div></div>`]);
   }else if(i.route==="traefik"){
@@ -741,8 +814,9 @@ function nbFields(){
     <div class="issue ${f.bw.enabled?"info":"info"}" style="margin-bottom:10px">Länderregel wird durchgesetzt von <b>${f.bw.enabled?"BunkerWeb":"NetBird"}</b> –
       ${f.bw.enabled?"die Domain läuft über BunkerWeb, NetBird sieht dort nur die BunkerWeb-IP. Das Dashboard schreibt die Länder als WHITELIST_COUNTRY / BLACKLIST_COUNTRY in BunkerWeb und leert sie in NetBird."
                     :"direkter Weg, netbird-proxy sieht die echte IP. Beim Umschalten auf BunkerWeb wandert die Regel automatisch mit."}</div>
-    <div class="field"><label>Nur erlauben</label><input type="text" id="f-allow" value="${esc(n.access.allowed_countries.join(", "))}" placeholder="z.B. CH, DE (leer = alle)"></div>
-    <div class="field"><label>Sperren</label><input type="text" id="f-block" value="${esc(n.access.blocked_countries.join(", "))}" placeholder="z.B. RU, CN"></div>
+    <div class="field"><label>Nur erlauben</label><div>${countryPickerHtml("f-allow", n.access.allowed_countries, "allow")}</div>
+      <div class="help">Leer = Zugriff aus allen Ländern. Sonst werden alle anderen Länder abgewiesen.</div></div>
+    <div class="field"><label>Sperren</label><div>${countryPickerHtml("f-block", n.access.blocked_countries, "block")}</div></div>
     <div class="field"><label>CrowdSec (NetBird)</label><div class="seg" id="f-cs">${[["off","aus","r"],["observe","beobachten","a"],["enforce","blockieren","g"]].map(([v,l,c])=>`<button type="button" class="${n.access.crowdsec_mode===v?"on "+c:""}" data-v="${v}">${l}</button>`).join("")}</div>
       ${f.bw.enabled?'<div class="help">Hinter BunkerWeb wirkungslos (prüft nur die BunkerWeb-IP) – dort schützt der CrowdSec-Bouncer von BunkerWeb.</div>':""}</div>
   </div>`;
@@ -855,9 +929,9 @@ function bindDrawer(){
   on("f-pw","input", e => { f.nb.auth.password = e.target.value; updateFoot(); });
   on("f-pin-on","change", e => { f.nb.auth.pin_enabled = e.target.checked; if(!e.target.checked) f.nb.auth.pin=""; rerender(); });
   on("f-pin","input", e => { f.nb.auth.pin = e.target.value; updateFoot(); });
-  const ccList = v => v.split(/[\s,;]+/).map(x=>x.trim().toUpperCase()).filter(Boolean);
-  on("f-allow","input", e => { f.nb.access.allowed_countries = ccList(e.target.value); updateFoot(); });
-  on("f-block","input", e => { f.nb.access.blocked_countries = ccList(e.target.value); updateFoot(); });
+  const rerenderFocus = id => { rerender(); if(id){ const inp = document.querySelector(`#${id} .csearch`); if(inp) inp.focus(); } };
+  bindCountryPicker("f-allow", () => f.nb.access.allowed_countries, v => { f.nb.access.allowed_countries = v; }, rerenderFocus);
+  bindCountryPicker("f-block", () => f.nb.access.blocked_countries, v => { f.nb.access.blocked_countries = v; }, rerenderFocus);
   document.querySelectorAll("#f-cs button").forEach(b => b.onclick = () => { f.nb.access.crowdsec_mode = b.dataset.v; rerender(); });
   // BunkerWeb
   on("b-on","change", e => {
