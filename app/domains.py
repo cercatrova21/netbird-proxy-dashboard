@@ -468,11 +468,46 @@ def _scheduler_logs_since(docker_client, since_ts):
     return c.logs(stdout=True, stderr=True, since=int(since_ts)).decode(errors="replace")
 
 
-def bw_apply(docker_client, joblog):
-    """bw-scheduler mit der aktuellen Sites-Datei neu erstellen und auf den Reload warten."""
+BW_INSTANCE_CONTAINER = os.environ.get("BW_INSTANCE_CONTAINER", "bunkerweb")
+LIVE_MARKER = "Neue BunkerWeb-Konfiguration ist aktiv"
+
+
+def _bw_health_ok(docker_client):
+    """Interner Health-Endpunkt der BunkerWeb-Instanz: msg 'ok' (bereit) oder 'reloading'."""
+    try:
+        c = docker_client().containers.get(BW_INSTANCE_CONTAINER)
+        r = c.exec_run(["curl", "-s", "-m", "3", "-H", "Host: bwapi", "http://127.0.0.1:5000/health"])
+        return r.exit_code == 0 and json.loads(r.output.decode() or "{}").get("msg") == "ok"
+    except Exception:
+        return False
+
+
+def _bw_scan_logs(docker_client, st, joblog):
+    """Scheduler-Logs seit Start auswerten -> (logs, fatal_lines)."""
+    logs = _scheduler_logs_since(docker_client, st["t0"])
+    for line in logs.splitlines():
+        if ("is not valid" in line or "Ignoring variable" in line) and line not in st["warned"]:
+            st["warned"].add(line)
+            joblog("  WARNUNG: " + line[-300:])
+    # Nur Fehler beim Erzeugen/Laden der Konfiguration sind fatal (nicht z.B. ein
+    # fehlgeschlagener Blacklist-Download eines Jobs).
+    bad = [ln for ln in logs.splitlines() if "❌" in ln and any(
+        x in ln for x in ("SAVE_CONFIG", "GENERATOR", "eload", "onfig"))]
+    if bad:
+        for ln in bad[-5:]:
+            joblog("  FEHLER: " + ln[-300:])
+        raise DomainError("BunkerWeb meldet einen Fehler beim Laden der Konfiguration")
+    return logs
+
+
+def bw_apply_start(docker_client, joblog):
+    """bw-scheduler neu erstellen und warten, bis BunkerWeb mit der NEUEN Konfiguration
+    bedient (nach dem ersten Reload, ca. halbe Zeit). BunkerWeb laedt nach dem Start
+    des Schedulers ein zweites Mal mit derselben Konfiguration neu - darauf wartet
+    bw_apply_finish(), am Ende des Jobs."""
     if not os.path.exists(COMPOSE_BIN):
         raise DomainError(f"docker-compose nicht gefunden ({COMPOSE_BIN})")
-    t0 = time.time() - 1
+    st = {"t0": time.time() - 1, "warned": set(), "complete": False}
     cmd = [COMPOSE_BIN, "up", "-d", "--no-deps", "--force-recreate", BW_SCHEDULER_SERVICE]
     joblog(f"$ docker compose up -d --no-deps --force-recreate {BW_SCHEDULER_SERVICE}")
     p = subprocess.run(cmd, cwd=BW_COMPOSE_DIR, capture_output=True, text=True, timeout=180)
@@ -481,32 +516,61 @@ def bw_apply(docker_client, joblog):
         joblog("  " + line)
     if p.returncode != 0:
         raise DomainError(f"docker compose fehlgeschlagen (Exit {p.returncode})")
-    joblog("Warte auf Konfigurations-Reload von BunkerWeb ...")
+    joblog("Warte, bis BunkerWeb die neue Konfiguration geladen hat ...")
     deadline = time.time() + BW_APPLY_TIMEOUT
-    warned = set()
+    ok_since = None
     while time.time() < deadline:
         time.sleep(3)
         try:
-            logs = _scheduler_logs_since(docker_client, t0)
+            logs = _bw_scan_logs(docker_client, st, joblog)
+        except DomainError:
+            raise
         except Exception as e:  # Container evtl. gerade im Neustart
             joblog(f"  (Logs noch nicht lesbar: {e})")
             continue
-        for line in logs.splitlines():
-            if ("is not valid" in line or "Ignoring variable" in line) and line not in warned:
-                warned.add(line)
-                joblog("  WARNUNG: " + line[-300:])
         if "Successfully reloaded" in logs:
-            joblog("BunkerWeb hat die neue Konfiguration geladen.")
-            return {"warnings": sorted(warned)}
-        # Nur Fehler beim Erzeugen/Laden der Konfiguration sind fatal (nicht z.B.
-        # ein fehlgeschlagener Blacklist-Download eines Jobs).
-        bad = [ln for ln in logs.splitlines() if "❌" in ln and any(
-            x in ln for x in ("SAVE_CONFIG", "GENERATOR", "eload", "onfig"))]
-        if bad:
-            for ln in bad[-5:]:
-                joblog("  FEHLER: " + ln[-300:])
-            raise DomainError("BunkerWeb meldet einen Fehler beim Laden der Konfiguration")
-    raise DomainError(f"Kein erfolgreicher Reload innerhalb von {BW_APPLY_TIMEOUT}s")
+            st["complete"] = True
+            joblog(f"{LIVE_MARKER} (Reload abgeschlossen).")
+            return st
+        if "bunkerweb:5000/reload" in logs:
+            # Reload ist angestossen: bereit, sobald der Health-Endpunkt zweimal
+            # hintereinander 'ok' meldet (nicht mehr 'reloading').
+            if _bw_health_ok(docker_client):
+                if ok_since and time.time() - ok_since >= 3:
+                    joblog(f"{LIVE_MARKER}. Ein zweiter, gleichwertiger Reload laeuft im Hintergrund weiter.")
+                    return st
+                ok_since = ok_since or time.time()
+            else:
+                ok_since = None
+    raise DomainError(f"Neue Konfiguration nicht innerhalb von {BW_APPLY_TIMEOUT}s aktiv")
+
+
+def bw_apply_finish(docker_client, joblog, st):
+    """Auf den Abschluss des zweiten Reloads warten (nur Absicherung; die Konfiguration
+    ist zu diesem Zeitpunkt schon aktiv)."""
+    if st.get("complete"):
+        return {"warnings": sorted(st["warned"])}
+    joblog("Warte auf Abschluss des zweiten BunkerWeb-Reloads ...")
+    deadline = st["t0"] + BW_APPLY_TIMEOUT + 240
+    while time.time() < deadline:
+        try:
+            logs = _bw_scan_logs(docker_client, st, joblog)
+        except DomainError:
+            raise
+        except Exception:
+            logs = ""
+        if "Successfully reloaded" in logs:
+            st["complete"] = True
+            joblog("BunkerWeb-Reload abgeschlossen.")
+            return {"warnings": sorted(st["warned"])}
+        time.sleep(3)
+    raise DomainError("Zweiter BunkerWeb-Reload nicht abgeschlossen")
+
+
+def bw_apply(docker_client, joblog):
+    """Komplett: neu erstellen, aktiv, Abschluss abwarten (fuer Rollbacks)."""
+    st = bw_apply_start(docker_client, joblog)
+    return bw_apply_finish(docker_client, joblog, st)
 
 
 # --------------------------------------------------------------------------- #
@@ -557,6 +621,34 @@ def write_traefik_file(data):
                 pass
     _write_in_place(TRAEFIK_DYNAMIC_PATH, text)
     return backup
+
+
+def traefik_set_bw_routers(enable=(), disable=()):
+    """Mehrere BunkerWeb-Router in EINEM Schreibvorgang setzen/entfernen."""
+    data = read_traefik_file()
+    http = data.setdefault("http", {})
+    routers = http.get("routers") or {}
+    http["routers"] = routers
+    existing = traefik_file_bw_routers(data)
+    changed = False
+    for domain in enable:
+        if domain not in existing:
+            routers[router_name_for(domain)] = {
+                "rule": f"Host(`{domain}`)", "entryPoints": [TRAEFIK_ENTRYPOINT], "priority": 100,
+                "service": TRAEFIK_BW_SERVICE, "tls": {"certResolver": TRAEFIK_CERT_RESOLVER},
+            }
+            changed = True
+    for domain in disable:
+        if domain in existing:
+            routers.pop(existing[domain], None)
+            changed = True
+    if not routers:
+        http.pop("routers", None)
+    if not http:
+        data.pop("http", None)
+    if changed:
+        write_traefik_file(data)
+    return changed
 
 
 def traefik_set_bw_router(domain, enabled):
@@ -973,6 +1065,12 @@ def register(app, get_conn, nb_base, nb_token, docker_client, backup_sync_lookup
             errors.append(f"Traefik-Datei: {e}")
         label_routers = traefik_label_routers(docker_client)
         traffic = _traffic_stats()
+        try:
+            cp = get_conn()
+            pending_set = {r[0] for r in cp.execute("SELECT domain FROM domain_pending").fetchall()}
+            cp.close()
+        except Exception:
+            pending_set = set()
         backup = backup_sync_lookup() if backup_sync_lookup else {}
 
         label_bw = {}
@@ -1028,6 +1126,7 @@ def register(app, get_conn, nb_base, nb_token, docker_client, backup_sync_lookup
                 "traffic": traffic.get(d),
                 "backup_sync": backup.get(d),
                 "countries": countries,
+                "pending": d in pending_set,
                 "issues": issues,
             })
         # Reine Traefik-Infrastruktur (z.B. netbird.cercatrova.me), die nicht schon oben steht
@@ -1305,6 +1404,7 @@ def register(app, get_conn, nb_base, nb_token, docker_client, backup_sync_lookup
                 last_flush[0] = time.time()
 
         domain = plan["domain"]
+        bw_state = None
         undo = []  # (Beschreibung, fn)
         status, summary = "ok", "Erfolgreich"
         try:
@@ -1349,8 +1449,8 @@ def register(app, get_conn, nb_base, nb_token, docker_client, backup_sync_lookup
                             bw_apply(docker_client, joblog)
                     undo.append(("BunkerWeb-Sites-Datei zuruecksetzen", _restore))
                     if kind != "bw_write_noreload":
-                        res = bw_apply(docker_client, joblog)
-                        if res["warnings"]:
+                        bw_state = bw_apply_start(docker_client, joblog)
+                        if bw_state["warned"]:
                             raise DomainError("BunkerWeb hat Settings verworfen (siehe Warnungen)")
                 elif kind == "traefik_on":
                     traefik_set_bw_router(domain, True)
@@ -1397,6 +1497,10 @@ def register(app, get_conn, nb_base, nb_token, docker_client, backup_sync_lookup
                                           "- Domain waere vermutlich fuer alle gesperrt")
                     if bad_now:
                         status, summary = "warn", f"Ausgefuehrt, Testaufruf aber nicht OK ({_fmt_http(res)})"
+            if bw_state is not None:
+                res = bw_apply_finish(docker_client, joblog, bw_state)
+                if res["warnings"]:
+                    raise DomainError("BunkerWeb hat Settings verworfen (siehe Warnungen)")
             _cert_cache.pop(domain, None)
         except Exception as e:
             log.exception("domain-job %s fehlgeschlagen", job_id)
@@ -1415,6 +1519,14 @@ def register(app, get_conn, nb_base, nb_token, docker_client, backup_sync_lookup
         finally:
             joblog(f"Fertig: {summary}")
             _job_update(job_id, status=status, summary=summary, finished_at=_now_iso(), log="\n".join(lines))
+            if status in ("ok", "warn"):
+                try:
+                    c = get_conn()
+                    c.execute("DELETE FROM domain_pending WHERE domain = ?", (domain,))
+                    c.commit()
+                    c.close()
+                except Exception:
+                    pass
             lookups_cache["at"] = 0
             job_lock.release()
 
@@ -1429,6 +1541,329 @@ def register(app, get_conn, nb_base, nb_token, docker_client, backup_sync_lookup
                 s += f" (Server: {res['server']})"
             return s
         return res.get("error") or "-"
+
+
+    # ---------------- Sammel-Aenderung (viele Domains, ein BunkerWeb-Reload) ----------------
+
+    BULK_KINDS = {"bw_write", "bw_write_noreload", "bw_remove", "traefik_on", "traefik_off",
+                  "wait_cert", "nb_update", "http_check"}
+
+    def make_bulk_plan(specs):
+        if not specs or len(specs) > 60:
+            raise DomainError("1-60 Domains erwartet")
+        plans, seen = [], set()
+        for sp in specs:
+            sp = copy.deepcopy(sp)
+            sp["action"] = "save"
+            pl = make_plan(sp)
+            if pl["domain"] in seen:
+                raise DomainError(f"{pl['domain']} doppelt")
+            seen.add(pl["domain"])
+            bad = {x["kind"] for x in pl["steps"]} - BULK_KINDS
+            if bad:
+                raise DomainError(f"{pl['domain']}: in der Sammel-Aenderung nicht moeglich ({', '.join(sorted(bad))}) - einzeln ausfuehren")
+            if pl["steps"]:
+                plans.append(pl)
+        if not plans:
+            raise DomainError("Keine Aenderungen")
+        K = lambda p: {x["kind"] for x in p["steps"]}
+        n_off = sum(1 for p in plans if "traefik_off" in K(p))
+        n_bw = sum(1 for p in plans if K(p) & {"bw_write", "bw_remove"})
+        n_bwn = sum(1 for p in plans if K(p) & {"bw_write", "bw_write_noreload", "bw_remove"})
+        n_rt = sum(1 for p in plans if "traefik_on" in K(p))
+        n_nb = sum(1 for p in plans if "nb_update" in K(p) and "traefik_off" not in K(p))
+        steps = []
+        if n_off:
+            steps.append({"kind": "bulk_off", "system": "Traefik",
+                          "text": f"{n_off} Domain(s) zurueck auf den direkten Weg (Laender zurueck nach NetBird, dann Router entfernen)"})
+        if n_bwn:
+            steps.append({"kind": "bulk_bw", "system": "BunkerWeb",
+                          "text": (f"{n_bwn} Site(s) in einem Schreibvorgang aendern, bw-scheduler EINMAL neu laden"
+                                   if n_bw else f"{n_bwn} Site(s): nur Notizen/Kommentare (kein Reload)")})
+        if n_rt:
+            steps.append({"kind": "bulk_traefik", "system": "Traefik",
+                          "text": f"{n_rt} Router in einem Schreibvorgang anlegen (Domains wechseln auf BunkerWeb)"})
+            steps.append({"kind": "bulk_cert", "system": "Pruefung",
+                          "text": f"Zertifikate fuer {n_rt} Domain(s) parallel abwarten"})
+        if n_nb:
+            steps.append({"kind": "bulk_nb", "system": "NetBird", "text": f"{n_nb} NetBird-Service(s) aktualisieren"})
+        steps.append({"kind": "bulk_http", "system": "Pruefung", "text": f"Testaufruf aller {len(plans)} Domains"})
+        warnings = sorted({w for p in plans for w in p["warnings"]})
+        if n_bw:
+            warnings.append("Ein BunkerWeb-Reload fuer alle Aenderungen zusammen: bestehende WebSocket-Verbindungen "
+                            "aller BunkerWeb-Domains brechen dabei einmal ab und verbinden sich neu.")
+        if len(plans) > 1:
+            warnings.append("Scheitert eine Domain, wird nur sie zurueckgerollt.")
+        pub = {"domain": plans[0]["domain"] if len(plans) == 1 else f"{len(plans)} Domains",
+               "action": "bulk", "steps": steps, "warnings": warnings,
+               "domains": [{"domain": p["domain"], "steps": [x["text"] for x in p["steps"]],
+                            "countries": p.get("countries"), "nb_diff": p["nb_diff"], "bw_diff": p["bw_diff"]}
+                           for p in plans],
+               "nb_diff": [], "bw_diff": [], "dns": None}
+        return pub, plans
+
+    def run_bulk_job(job_id, pub, plans, pending=False):
+        lines = []
+        last_flush = [0.0]
+
+        def joblog(msg):
+            lines.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+            log.info("domain-job %s: %s", job_id, msg)
+            if time.time() - last_flush[0] > 0.5:
+                _job_update(job_id, log="\n".join(lines))
+                last_flush[0] = time.time()
+
+        by = {p["domain"]: p for p in plans}
+        kinds = {d: {x["kind"] for x in p["steps"]} for d, p in by.items()}
+        failed = {}          # domain -> Grund
+        nb_done = {}         # domain -> alter ServiceRequest (fuer Rollback)
+        routers_added, routers_removed = [], []
+        total = len(pub["steps"])
+        status, summary = "ok", ""
+        sites_before = None
+        bw_state = None
+        warn_domains = []
+
+        def step(kind):
+            idx = next(i for i, x in enumerate(pub["steps"], 1) if x["kind"] == kind)
+            joblog(f"Schritt {idx}/{total} [{pub['steps'][idx-1]['system']}] {pub['steps'][idx-1]['text']}")
+
+        def rollback_domain(d, reason):
+            if d in failed:
+                return
+            failed[d] = reason
+            joblog(f"  {d}: FEHLER - {reason} -> wird zurueckgerollt")
+            if d in routers_added:
+                try:
+                    traefik_set_bw_routers(disable=[d])
+                    routers_added.remove(d)
+                    joblog("    Router entfernt (wieder direkt ueber netbird-proxy)")
+                except Exception as e:
+                    joblog(f"    Rollback-FEHLER Router: {e}")
+            if d in nb_done:
+                try:
+                    nb.update(by[d]["_svc"]["id"], nb_done.pop(d))
+                    joblog("    NetBird-Service zurueckgesetzt")
+                except Exception as e:
+                    joblog(f"    Rollback-FEHLER NetBird: {e}")
+
+        def nb_apply(d):
+            old = service_to_request(by[d]["_svc"])
+            nb.update(by[d]["_svc"]["id"], by[d]["_new_body"])
+            nb_done[d] = old
+            joblog(f"  {d}: NetBird-Service aktualisiert")
+
+        try:
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                pre = dict(zip(by, ex.map(check_http, by)))
+            joblog("Vorher-Tests: " + ", ".join(f"{d}={_fmt_http(r).split(' ->')[0]}" for d, r in pre.items()))
+
+            # 0) Zurueck auf direkt: erst NetBird-Laender setzen, dann Router weg (vor dem BW-Reload)
+            off = [d for d in by if "traefik_off" in kinds[d]]
+            if off:
+                step("bulk_off")
+                for d in off:
+                    if "nb_update" in kinds[d]:
+                        try:
+                            nb_apply(d)
+                        except Exception as e:
+                            rollback_domain(d, f"NetBird-Update: {e}")
+                rm = [d for d in off if d not in failed]
+                if rm:
+                    traefik_set_bw_routers(disable=rm)
+                    routers_removed.extend(rm)
+                    joblog(f"  Router entfernt: {', '.join(rm)}")
+
+            # 1) BunkerWeb: alle Sites in einem Schreibvorgang, ein Reload
+            if any(x["kind"] == "bulk_bw" for x in pub["steps"]):
+                step("bulk_bw")
+                sites = read_bw_sites()
+                sites_before = copy.deepcopy(sites)
+                need_reload = False
+                for d, p in by.items():
+                    if kinds[d] & {"bw_write", "bw_write_noreload"}:
+                        if d not in sites["server_names"]:
+                            sites["server_names"].append(d)
+                        sites["sites"][d] = p["_new_site"]
+                        need_reload |= "bw_write" in kinds[d]
+                    elif "bw_remove" in kinds[d] and d not in failed:
+                        sites["server_names"] = [x for x in sites["server_names"] if x != d]
+                        sites["sites"].pop(d, None)
+                        need_reload = True
+                backup = write_bw_sites(sites)
+                joblog(f"  Sites-Datei geschrieben (Backup: {os.path.basename(backup) if backup else '-'})")
+                if need_reload:
+                    try:
+                        bw_state = bw_apply_start(docker_client, joblog)
+                        if bw_state["warned"]:
+                            raise DomainError("BunkerWeb hat Settings verworfen (siehe Warnungen)")
+                    except Exception:
+                        joblog("  BunkerWeb-Reload fehlgeschlagen -> alte Sites-Datei wiederherstellen")
+                        write_bw_sites(sites_before)
+                        sites_before = None
+                        bw_apply(docker_client, joblog)
+                        if routers_removed:
+                            traefik_set_bw_routers(enable=routers_removed)
+                            joblog("  Entfernte Router wiederhergestellt")
+                            routers_removed.clear()
+                        raise
+
+            # 2) Traefik: alle neuen Router auf einmal
+            todo_rt = [d for d in by if "traefik_on" in kinds[d]]
+            if todo_rt:
+                step("bulk_traefik")
+                traefik_set_bw_routers(enable=todo_rt)
+                routers_added.extend(todo_rt)
+                joblog(f"  {len(todo_rt)} Router aktiv: {', '.join(todo_rt)}")
+
+                # 3) Zertifikate parallel
+                step("bulk_cert")
+                time.sleep(3)
+                deadline = time.time() + CERT_WAIT_SECONDS
+                pending_c = set(todo_rt)
+                while pending_c and time.time() < deadline:
+                    with ThreadPoolExecutor(max_workers=8) as ex:
+                        res = dict(zip(pending_c, ex.map(check_cert, list(pending_c))))
+                    for d, r in res.items():
+                        if r.get("ok"):
+                            pending_c.discard(d)
+                            _cert_cache[d] = {"at": time.time(), "res": r}
+                            joblog(f"  {d}: Zertifikat gueltig ({r['issuer']}, {r['days_left']} Tage)")
+                    if pending_c:
+                        time.sleep(5)
+                for d in sorted(pending_c):
+                    rollback_domain(d, f"kein gueltiges Zertifikat nach {CERT_WAIT_SECONDS}s ({check_cert(d).get('error')})")
+
+            # 4) NetBird (z.B. Laender entfernen, wenn der Weg ueber BunkerWeb steht)
+            todo_nb = [d for d in by if "nb_update" in kinds[d] and "traefik_off" not in kinds[d] and d not in failed]
+            if todo_nb:
+                step("bulk_nb")
+                for d in todo_nb:
+                    try:
+                        nb_apply(d)
+                    except Exception as e:
+                        rollback_domain(d, f"NetBird-Update: {e}")
+
+            # 5) Testaufrufe
+            step("bulk_http")
+            time.sleep(2)
+            ok_domains = [d for d in by if d not in failed]
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                post = dict(zip(ok_domains, ex.map(check_http, ok_domains)))
+            for d in ok_domains:
+                r, pr = post[d], pre.get(d) or {}
+                joblog(f"  {d}: vorher {_fmt_http(pr).split(' ->')[0]} / jetzt {_fmt_http(r)[:120]}")
+                route_change = bool(kinds[d] & {"traefik_on", "traefik_off"})
+                revertible = "traefik_off" not in kinds[d]   # Rueckweg auf direkt nicht zurueckrollen
+                if not r.get("ok") and pr.get("ok") and revertible:
+                    rollback_domain(d, "Testaufruf fehlgeschlagen, vorher funktionierte die Domain")
+                elif (revertible and route_change and pr.get("status") and r.get("status") in (401, 403)
+                      and pr["status"] not in (401, 403)):
+                    rollback_domain(d, f"jetzt HTTP {r['status']}, vorher {pr['status']} - vermutlich fuer alle gesperrt")
+                elif not r.get("ok"):
+                    warn_domains.append(d)
+
+            # 6) Zweiten BunkerWeb-Reload abschliessen
+            if bw_state is not None:
+                res = bw_apply_finish(docker_client, joblog, bw_state)
+                if res["warnings"]:
+                    raise DomainError("BunkerWeb hat Settings verworfen (siehe Warnungen)")
+
+            # 7) Sites der zurueckgerollten Domains zuruecksetzen (zweiter Reload nur bei Fehlern)
+            bw_failed = [d for d in failed if kinds[d] & {"bw_write", "bw_write_noreload"}]
+            if bw_failed and sites_before is not None:
+                joblog(f"BunkerWeb-Sites von {', '.join(bw_failed)} zuruecksetzen ...")
+                sites = read_bw_sites()
+                for d in bw_failed:
+                    if d in sites_before["sites"]:
+                        sites["sites"][d] = sites_before["sites"][d]
+                    else:
+                        sites["server_names"] = [x for x in sites["server_names"] if x != d]
+                        sites["sites"].pop(d, None)
+                write_bw_sites(sites)
+                bw_apply(docker_client, joblog)
+
+            done = [d for d in by if d not in failed]
+            if failed:
+                status = "warn" if done else "error"
+                summary = (f"{len(done)} von {len(by)} umgesetzt; zurueckgerollt: "
+                           + ", ".join(f"{d} ({r})" for d, r in failed.items()))
+            else:
+                summary = f"Alle {len(by)} Aenderung(en) umgesetzt" if len(by) > 1 else "Erfolgreich"
+            if warn_domains:
+                status = "warn" if status == "ok" else status
+                summary += "; Testaufruf nicht OK: " + ", ".join(warn_domains)
+            if pending and done:
+                c = get_conn()
+                c.executemany("DELETE FROM domain_pending WHERE domain = ?", [(d,) for d in done])
+                c.commit()
+                c.close()
+        except Exception as e:
+            log.exception("bulk-job %s", job_id)
+            joblog(f"FEHLER: {e}")
+            for d in list(routers_added):
+                rollback_domain(d, "Abbruch")
+            for d in list(nb_done):
+                rollback_domain(d, "Abbruch")
+            if sites_before is not None and read_bw_sites() != sites_before:
+                try:
+                    joblog("BunkerWeb-Sites-Datei auf den Stand vor dem Job zuruecksetzen ...")
+                    write_bw_sites(sites_before)
+                    bw_apply(docker_client, joblog)
+                except Exception as re_:
+                    joblog(f"Rollback-FEHLER BunkerWeb: {re_} - bitte manuell pruefen!")
+            if routers_removed:
+                try:
+                    traefik_set_bw_routers(enable=routers_removed)
+                    joblog("Entfernte Router wiederhergestellt")
+                except Exception as re_:
+                    joblog(f"Rollback-FEHLER Traefik: {re_}")
+            status, summary = "error", f"Abgebrochen: {e}"
+        finally:
+            for d in failed:
+                _cert_cache.pop(d, None)
+            joblog(f"Fertig: {summary}")
+            _job_update(job_id, status=status, summary=summary, finished_at=_now_iso(), log="\n".join(lines))
+            lookups_cache["at"] = 0
+            job_lock.release()
+
+    # ---------------- Sammlung offener Aenderungen ----------------
+
+    c0 = get_conn()
+    c0.execute("""
+        CREATE TABLE IF NOT EXISTS domain_pending (
+            domain TEXT PRIMARY KEY,
+            spec TEXT NOT NULL,
+            summary TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    c0.commit()
+    c0.close()
+
+    def pending_specs():
+        c = get_conn()
+        rows = c.execute("SELECT * FROM domain_pending ORDER BY created_at").fetchall()
+        c.close()
+        return rows
+
+    def start_bulk_job(pub, plans, pending):
+        if not job_lock.acquire(blocking=False):
+            return None
+        try:
+            c = get_conn()
+            cur = c.execute(
+                "INSERT INTO domain_jobs (domain, action, created_at, status, plan, log) VALUES (?,?,?,?,?,?)",
+                (pub["domain"], "bulk", _now_iso(), "running", json.dumps(pub), ""))
+            job_id = cur.lastrowid
+            c.commit()
+            c.close()
+            threading.Thread(target=run_bulk_job, args=(job_id, pub, plans, pending), daemon=True).start()
+            return job_id
+        except Exception:
+            job_lock.release()
+            raise
 
     # ---------------- Routen ----------------
 
@@ -1548,6 +1983,118 @@ def register(app, get_conn, nb_base, nb_token, docker_client, backup_sync_lookup
         d = dict(r)
         d["plan"] = json.loads(d["plan"] or "{}")
         return jsonify(d)
+
+    @bp.route("/api/domains/bulk/plan", methods=["POST"])
+    def api_domain_bulk_plan():
+        if not configured:
+            return jsonify(error="Domain-Verwaltung nicht konfiguriert"), 503
+        try:
+            pub, _ = make_bulk_plan((request.get_json(force=True) or {}).get("items") or [])
+        except DomainError as e:
+            return jsonify(error=str(e)), 400
+        pub["plan_hash"] = _plan_hash(pub)
+        return jsonify(pub)
+
+    @bp.route("/api/domains/bulk/apply", methods=["POST"])
+    def api_domain_bulk_apply():
+        if not configured:
+            return jsonify(error="Domain-Verwaltung nicht konfiguriert"), 503
+        body = request.get_json(force=True) or {}
+        try:
+            pub, plans = make_bulk_plan(body.get("items") or [])
+        except DomainError as e:
+            return jsonify(error=str(e)), 400
+        if body.get("plan_hash") != _plan_hash(pub):
+            return jsonify(error="Der Zustand hat sich seit der Vorschau geaendert - bitte Vorschau neu laden."), 409
+        job_id = start_bulk_job(pub, plans, pending=False)
+        if job_id is None:
+            return jsonify(error="Es laeuft bereits eine Aenderung - bitte warten"), 409
+        return jsonify(job_id=job_id)
+
+    def _has_secret(spec):
+        a = ((spec.get("nb") or {}).get("auth") or {})
+        return bool(a.get("password") or a.get("pin"))
+
+    @bp.route("/api/domains/pending")
+    def api_pending_list():
+        out = []
+        for r in pending_specs():
+            out.append({"domain": r["domain"], "spec": json.loads(r["spec"]),
+                        "summary": json.loads(r["summary"] or "[]"),
+                        "created_at": r["created_at"], "updated_at": r["updated_at"]})
+        return jsonify(out)
+
+    @bp.route("/api/domains/pending/<domain>", methods=["PUT"])
+    def api_pending_put(domain):
+        spec = request.get_json(force=True) or {}
+        spec["domain"] = domain.lower()
+        spec["action"] = "save"
+        if _has_secret(spec):
+            return jsonify(error="Passwort/PIN werden nicht zwischengespeichert - diese Aenderung bitte sofort anwenden"), 400
+        try:
+            plan = make_plan(copy.deepcopy(spec))
+        except DomainError as e:
+            return jsonify(error=str(e)), 400
+        bad = {x["kind"] for x in plan["steps"]} - BULK_KINDS
+        if bad:
+            return jsonify(error="Diese Aenderung kann nicht gesammelt werden - bitte sofort anwenden"), 400
+        c = get_conn()
+        if not plan["steps"]:
+            c.execute("DELETE FROM domain_pending WHERE domain = ?", (plan["domain"],))
+            c.commit()
+            c.close()
+            return jsonify(removed=True, message="Keine Aenderung gegenueber dem aktuellen Stand")
+        now = _now_iso()
+        c.execute("""INSERT INTO domain_pending (domain, spec, summary, created_at, updated_at) VALUES (?,?,?,?,?)
+                     ON CONFLICT(domain) DO UPDATE SET spec=excluded.spec, summary=excluded.summary,
+                     updated_at=excluded.updated_at""",
+                  (plan["domain"], json.dumps(spec), json.dumps([x["text"] for x in plan["steps"]]), now, now))
+        c.commit()
+        c.close()
+        return jsonify(ok=True, steps=[x["text"] for x in plan["steps"]])
+
+    @bp.route("/api/domains/pending/<domain>", methods=["DELETE"])
+    def api_pending_delete(domain):
+        c = get_conn()
+        c.execute("DELETE FROM domain_pending WHERE domain = ?", (domain.lower(),))
+        c.commit()
+        c.close()
+        return jsonify(ok=True)
+
+    @bp.route("/api/domains/pending", methods=["DELETE"])
+    def api_pending_clear():
+        c = get_conn()
+        c.execute("DELETE FROM domain_pending")
+        c.commit()
+        c.close()
+        return jsonify(ok=True)
+
+    @bp.route("/api/domains/pending/plan", methods=["POST"])
+    def api_pending_plan():
+        specs = [json.loads(r["spec"]) for r in pending_specs()]
+        try:
+            pub, _ = make_bulk_plan(specs)
+        except DomainError as e:
+            return jsonify(error=str(e)), 400
+        pub["plan_hash"] = _plan_hash(pub)
+        return jsonify(pub)
+
+    @bp.route("/api/domains/pending/apply", methods=["POST"])
+    def api_pending_apply():
+        if not configured:
+            return jsonify(error="Domain-Verwaltung nicht konfiguriert"), 503
+        body = request.get_json(force=True) or {}
+        specs = [json.loads(r["spec"]) for r in pending_specs()]
+        try:
+            pub, plans = make_bulk_plan(specs)
+        except DomainError as e:
+            return jsonify(error=str(e)), 400
+        if body.get("plan_hash") != _plan_hash(pub):
+            return jsonify(error="Der Zustand hat sich seit der Vorschau geaendert - bitte Vorschau neu laden."), 409
+        job_id = start_bulk_job(pub, plans, pending=True)
+        if job_id is None:
+            return jsonify(error="Es laeuft bereits eine Aenderung - bitte warten"), 409
+        return jsonify(job_id=job_id)
 
     app.register_blueprint(bp)
     return {"configured": configured}

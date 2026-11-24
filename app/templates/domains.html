@@ -182,6 +182,20 @@
   .preset .pt{ font-weight:600; font-size:13px; }
   .preset .pd{ color:var(--muted); font-size:12px; margin-top:3px; line-height:1.45; }
 
+  /* Sammlung offener Aenderungen */
+  .pending-card{ border-color:rgba(242,184,75,.55); background:linear-gradient(180deg, rgba(242,184,75,.07), var(--panel)); }
+  .pending-head{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .pending-head h2{ margin:0; color:var(--amber); flex:1; }
+  .pending-list{ list-style:none; margin:10px 0 0; padding:0; }
+  .pending-list li{ display:flex; gap:10px; align-items:baseline; padding:6px 0; border-top:1px solid rgba(34,48,65,.6); font-size:13px; }
+  .pending-list li b{ min-width:220px; cursor:pointer; }
+  .pending-list li b:hover{ color:var(--info); }
+  .pending-list li .what{ flex:1; color:var(--muted); font-size:12px; }
+  .badge.pend{ color:var(--amber); border-color:rgba(242,184,75,.6); background:rgba(242,184,75,.1); }
+  .bulk-dom{ border:1px solid var(--border); border-radius:8px; padding:8px 12px; margin-bottom:8px; }
+  .bulk-dom summary{ cursor:pointer; font-weight:600; font-size:13px; }
+  .bulk-dom summary span{ color:var(--muted); font-weight:400; font-size:12px; }
+
   /* Laenderauswahl */
   .cpick{ border:1px solid var(--border); border-radius:8px; background:var(--panel-2); padding:6px; position:relative; }
   .cpick:focus-within{ border-color:var(--info); }
@@ -315,6 +329,16 @@
 
   <div class="tiles" id="tiles"></div>
 
+  <div class="card pending-card hidden" id="pending-card">
+    <div class="pending-head">
+      <h2 id="pending-title">Offene Änderungen</h2>
+      <button class="btn ghost sm" id="pending-clear">Alle verwerfen</button>
+      <button class="btn primary" id="pending-apply">Vorschau &amp; alle anwenden …</button>
+    </div>
+    <p class="hint" style="margin-top:6px">Gesammelte Änderungen werden zusammen ausgeführt – mit einem einzigen BunkerWeb-Reload statt einem pro Domain.</p>
+    <ul class="pending-list" id="pending-list"></ul>
+  </div>
+
   <div class="card" style="padding-bottom:6px">
     <div class="toolbar">
       <input type="search" id="search" placeholder="Domain oder Backend suchen …">
@@ -357,7 +381,8 @@
   <div class="drawer-foot" id="d-foot">
     <span class="msg" id="d-msg"></span>
     <button class="btn ghost" id="d-reset">Verwerfen</button>
-    <button class="btn primary" id="d-preview">Vorschau &amp; Anwenden …</button>
+    <button class="btn" id="d-queue" title="Änderung vormerken und später zusammen mit anderen anwenden (ein BunkerWeb-Reload für alle)">Zur Sammlung</button>
+    <button class="btn primary" id="d-preview">Sofort anwenden …</button>
   </div>
 </aside>
 
@@ -442,6 +467,36 @@ function banner(text, cls=""){
 }
 
 /* ------------------------------------------------------------------ Daten */
+async function loadPending(){
+  try{ S.pending = await api("/api/domains/pending"); }catch(e){ S.pending = []; }
+  const card = $("#pending-card");
+  card.classList.toggle("hidden", !S.pending.length);
+  $("#pending-title").textContent = `Offene Änderungen (${S.pending.length})`;
+  $("#pending-list").innerHTML = S.pending.map(p => `<li><b data-d="${esc(p.domain)}" title="Öffnen">${esc(p.domain)}</b>
+    <span class="what">${esc((p.summary||[]).filter(t=>!t.startsWith("Testaufruf")).join(" · "))}</span>
+    <button class="icon-btn del" data-rm="${esc(p.domain)}" title="Aus der Sammlung entfernen">✕</button></li>`).join("");
+  $("#pending-list").querySelectorAll("b[data-d]").forEach(b => b.onclick = () => openDrawer(b.dataset.d, "bw"));
+  $("#pending-list").querySelectorAll("button[data-rm]").forEach(b => b.onclick = async () => {
+    await api(`/api/domains/pending/${encodeURIComponent(b.dataset.rm)}`, {method:"DELETE"}); loadPending(); loadOverview();
+  });
+}
+function pendingFor(d){ return (S.pending||[]).find(p => p.domain === d); }
+function applySpecToForm(f, spec){
+  if(spec.nb){
+    const n = spec.nb;
+    for(const k of ["enabled","pass_host_header","rewrite_redirects"]) if(k in n) f.nb[k] = n[k];
+    if(n.target) f.nb.target = Object.assign({}, f.nb.target, n.target);
+    if(n.auth) for(const k of ["sso_enabled","sso_groups","password_enabled","pin_enabled"]) if(k in n.auth) f.nb.auth[k] = n.auth[k];
+    if(n.access) Object.assign(f.nb.access, n.access);
+  }
+  if(spec.bw){
+    f.bw.enabled = !!spec.bw.enabled;
+    if("note" in spec.bw) f.bw.note = spec.bw.note || "";
+    if(spec.bw.preset) f.bw.preset = spec.bw.preset;
+    if(spec.bw.settings) f.bw.settings = spec.bw.settings.map(x => ({...x}));
+  }
+}
+
 async function loadOverview(){
   try{
     const d = await api("/api/domains");
@@ -480,7 +535,7 @@ async function loadJobs(){
     if(!jobs.length){ t.innerHTML = `<tr><td class="muted">Noch keine Änderungen über das Dashboard.</td></tr>`; return; }
     t.innerHTML = `<tr><th>Zeit</th><th>Domain</th><th>Aktion</th><th>Status</th><th>Ergebnis</th></tr>` + jobs.map(j => `
       <tr data-job="${j.id}"><td class="mono">${esc(fmtTime(j.created_at))}</td><td>${esc(j.domain)}</td>
-      <td class="mono">${esc({save:"ändern",create:"anlegen",delete:"löschen"}[j.action]||j.action)}</td>
+      <td class="mono">${esc({save:"ändern",create:"anlegen",delete:"löschen",bulk:"Sammel-Änderung"}[j.action]||j.action)}</td>
       <td>${statusPill(j.status)}</td><td class="muted">${esc(j.summary||"")}</td></tr>`).join("");
     t.querySelectorAll("tr[data-job]").forEach(tr => tr.onclick = () => showJob(+tr.dataset.job));
   }catch(e){}
@@ -569,6 +624,7 @@ function badgesFor(i){
     if(i.nb.enabled===false) b.push(`<span class="badge bad">deaktiviert</span>`);
   }
   if(i.backup_sync && i.backup_sync.enabled===false) b.push(`<span class="badge" title="Nicht im Backup-Proxy-Sync">kein Backup</span>`);
+  if(i.pending) b.unshift(`<span class="badge pend" title="Änderung liegt in der Sammlung – noch nicht angewendet">● offen</span>`);
   return b.join("");
 }
 function rowHtml(i){
@@ -677,7 +733,9 @@ async function openDrawer(domain, tab){
   S.sel = domain || null;
   S.form = formFromItem(i);
   S.orig = JSON.parse(JSON.stringify(S.form));
-  S.tab = tab || (i ? "overview" : "nb");
+  const pend = i && pendingFor(i.domain);
+  if(pend) applySpecToForm(S.form, pend.spec);
+  S.tab = tab || (pend ? "bw" : i ? "overview" : "nb");
   $("#scrim").classList.remove("hidden"); $("#drawer").classList.remove("hidden");
   document.body.style.overflow = "hidden";
   render();
@@ -701,10 +759,19 @@ function drawDrawer(){
   $("#d-tabs").innerHTML = tabs.map(([k,l]) => `<button class="tab ${S.tab===k?"active":""}" data-t="${k}">${esc(l)}${(k==="nb"||k==="bw")&&isDirty(k)&&!f.isNew?' <span class="dirty">●</span>':""}</button>`).join("");
   $("#d-tabs").querySelectorAll(".tab").forEach(t => t.onclick = () => { S.tab = t.dataset.t; drawDrawer(); });
   const body = $("#d-body");
+  const pend = !f.isNew && pendingFor(f.domain);
+  const pendNote = pend ? `<div class="issue warn" style="margin-bottom:12px">Für diese Domain liegt eine Änderung in der Sammlung (Stand ${esc(fmtTime(pend.updated_at))}) – unten angezeigt, noch nicht angewendet.
+      <button class="btn sm ghost" id="d-unqueue" style="margin-left:6px">Aus Sammlung entfernen</button></div>` : "";
   if(S.tab==="overview") body.innerHTML = overviewHtml(i);
   else if(S.tab==="nb") body.innerHTML = nbFormHtml();
   else if(S.tab==="bw") body.innerHTML = bwFormHtml();
   else if(S.tab==="danger") body.innerHTML = dangerHtml();
+  if(pendNote) body.insertAdjacentHTML("afterbegin", pendNote);
+  const un = document.getElementById("d-unqueue");
+  if(un) un.onclick = async () => {
+    await api(`/api/domains/pending/${encodeURIComponent(f.domain)}`, {method:"DELETE"});
+    await loadPending(); S.form = JSON.parse(JSON.stringify(S.orig)); loadOverview(); drawDrawer();
+  };
   bindDrawer();
   updateFoot();
 }
@@ -716,6 +783,11 @@ function updateFoot(){
   else if(isDirty()){ msg.textContent = "Ungespeicherte Änderungen" + (isDirty("nb")&&isDirty("bw")?" (NetBird + BunkerWeb)":isDirty("nb")?" (NetBird)":" (BunkerWeb)"); msg.className = "msg dirty"; }
   else { msg.textContent = "Keine Änderungen"; msg.className = "msg"; }
   $("#d-preview").disabled = !f.isNew && !isDirty();
+  const secret = f.nb.auth.password || f.nb.auth.pin;
+  $("#d-queue").classList.toggle("hidden", f.isNew);
+  $("#d-queue").disabled = !isDirty() || !!secret;
+  $("#d-queue").title = secret ? "Passwort/PIN werden nicht zwischengespeichert – bitte sofort anwenden"
+                               : "Änderung vormerken und später zusammen mit anderen anwenden (ein BunkerWeb-Reload für alle)";
   $("#d-reset").classList.toggle("hidden", f.isNew || !isDirty());
 }
 
@@ -1055,10 +1127,10 @@ async function preview(action){
 }
 async function showJob(id){
   openModal("Änderung", `<div class="empty"><span class="spinner"></span></div>`, `<button class="btn ghost" id="m-close">Schliessen</button>`);
-  $("#m-close").onclick = () => { closeModal(); loadOverview(); loadJobs(); };
+  $("#m-close").onclick = () => { closeModal(); loadOverview(); loadJobs(); loadPending(); };
   const draw = async () => {
     let j; try{ j = await api(`/api/domains/jobs/${id}`); }catch(e){ return; }
-    $("#m-title").textContent = `${j.domain} · ${({save:"ändern",create:"anlegen",delete:"löschen"})[j.action]||j.action}`;
+    $("#m-title").textContent = `${j.domain} · ${({save:"ändern",create:"anlegen",delete:"löschen",bulk:"Sammel-Änderung"})[j.action]||j.action}`;
     $("#m-status").innerHTML = statusPill(j.status);
     const steps = (j.plan && j.plan.steps) || [];
     const logTxt = j.log || "";
@@ -1070,12 +1142,14 @@ async function showJob(id){
       else if(k===doneIdx && (j.status==="error"||j.status==="rolled_back")) mark = ' <span style="color:var(--deny)">✕</span>';
       return `<li><span class="sys ${esc(s.system)}">${esc(s.system==="Pruefung"?"Prüfung":s.system)}</span><span>${esc(s.text)}${mark}</span></li>`;
     }).join("")}</ol>`;
+    const live = j.status==="running" && logTxt.includes("Neue BunkerWeb-Konfiguration ist aktiv")
+      ? `<div class="banner ok" style="margin-bottom:12px">✓ Die neue BunkerWeb-Konfiguration ist bereits aktiv. Der Job führt die restlichen Schritte aus und wartet am Ende den zweiten, gleichwertigen Reload von BunkerWeb ab.</div>` : "";
     const res = j.status!=="running" ? `<div class="banner ${j.status==="ok"?"ok":j.status==="error"?"err":""}" style="margin-bottom:12px">${esc(j.summary||"")}${j.status==="rolled_back"?"<br>Die bereits ausgeführten Schritte wurden zurückgenommen.":""}</div>` : "";
     const pre = $("#m-body pre.joblog");
     const atBottom = !pre || pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20;
-    $("#m-body").innerHTML = res + stepHtml + `<pre class="joblog">${esc(logTxt||"…")}</pre>`;
+    $("#m-body").innerHTML = live + res + stepHtml + `<pre class="joblog">${esc(logTxt||"…")}</pre>`;
     const p2 = $("#m-body pre.joblog"); if(atBottom) p2.scrollTop = p2.scrollHeight;
-    if(j.status!=="running" && S.polling){ clearInterval(S.polling); S.polling = null; loadOverview(); loadJobs(); }
+    if(j.status!=="running" && S.polling){ clearInterval(S.polling); S.polling = null; loadOverview(); loadJobs(); loadPending(); }
   };
   await draw();
   if(S.polling) clearInterval(S.polling);
@@ -1096,7 +1170,46 @@ document.addEventListener("keydown", e => {
   if(!$("#modal").classList.contains("hidden")){ if(!S.polling) closeModal(); return; }
   if(!$("#drawer").classList.contains("hidden")) closeDrawer();
 });
-loadOverview(); loadJobs();
+$("#d-queue").onclick = async () => {
+  const spec = buildSpec();
+  try{
+    const r = await api(`/api/domains/pending/${encodeURIComponent(S.form.domain)}`, {method:"PUT", body: JSON.stringify(spec)});
+    await loadPending(); await loadOverview();
+    closeDrawer(true);
+    banner(r.removed ? esc(r.message) : `Änderung für <b>${esc(spec.domain)}</b> in die Sammlung gelegt.`, r.removed ? "" : "ok");
+    setTimeout(() => banner(""), 5000);
+  }catch(e){ $("#d-msg").textContent = e.message; $("#d-msg").className = "msg dirty"; }
+};
+$("#pending-clear").onclick = async () => {
+  if(!confirm("Alle gesammelten Änderungen verwerfen?")) return;
+  await api("/api/domains/pending", {method:"DELETE"}); loadPending(); loadOverview();
+};
+$("#pending-apply").onclick = async () => {
+  openModal("Gesammelte Änderungen", `<div class="empty"><span class="spinner"></span> plane …</div>`, `<button class="btn ghost" id="m-cancel">Abbrechen</button>`);
+  $("#m-cancel").onclick = closeModal;
+  let plan;
+  try{ plan = await api("/api/domains/pending/plan", {method:"POST", body:"{}"}); }
+  catch(e){ $("#m-body").innerHTML = `<div class="issue error">${esc(e.message)}</div>`; return; }
+  $("#m-body").innerHTML = `
+    <p class="hint" style="margin-bottom:12px">Ein Job für ${plan.domains.length} Domain(s), in dieser Reihenfolge:</p>
+    <ol class="steps">${plan.steps.map(x=>`<li><span class="sys ${esc(x.system)}">${esc(x.system==="Pruefung"?"Prüfung":x.system)}</span><span>${esc(x.text)}</span></li>`).join("")}</ol>
+    ${plan.warnings.length?`<ul class="warnlist">${plan.warnings.map(w=>`<li>${esc(w)}</li>`).join("")}</ul>`:""}
+    ${plan.domains.map(x => `<details class="bulk-dom"><summary>${esc(x.domain)} <span>· ${esc(x.steps.filter(t=>!t.startsWith("Testaufruf")).join(" · "))}</span></summary>
+      <div style="margin-top:8px">${diffTable("NetBird-Service", x.nb_diff)}${diffTable("BunkerWeb-Settings", x.bw_diff)}</div></details>`).join("")}`;
+  $("#m-foot").innerHTML = `<button class="btn ghost" id="m-cancel">Abbrechen</button><button class="btn primary" id="m-run">Alle anwenden</button>`;
+  $("#m-cancel").onclick = closeModal;
+  $("#m-run").onclick = async () => {
+    $("#m-run").disabled = true;
+    try{
+      const r = await api("/api/domains/pending/apply", {method:"POST", body: JSON.stringify({plan_hash: plan.plan_hash})});
+      showJob(r.job_id);
+    }catch(e){
+      $("#m-body").insertAdjacentHTML("afterbegin", `<div class="issue error" style="margin-bottom:10px">${esc(e.message)}</div>`);
+      $("#m-run").disabled = false;
+    }
+  };
+};
+loadPending(); loadOverview(); loadJobs();
 setInterval(() => { if($("#drawer").classList.contains("hidden") && $("#modal").classList.contains("hidden")) loadOverview(); }, 60000);
 </script>
 </body>
