@@ -12,6 +12,7 @@ import json
 import logging
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
+from urllib.parse import unquote
 
 import docker as docker_sdk
 import maxminddb
@@ -622,9 +623,11 @@ def _bw_classify(msg):
 
 
 def _bw_split_request(request_line):
+    """(method, path) wie NetBird sie meldet: Query weg, Pfad URL-dekodiert
+    (NetBird liefert z.B. ein als %3F kodiertes '?' dekodiert im Pfad)."""
     parts = request_line.split(" ")
     if len(parts) >= 2:
-        return parts[0], parts[1].split("?", 1)[0]
+        return parts[0], unquote(parts[1].split("?", 1)[0])
     return None, request_line or None
 
 
