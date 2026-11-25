@@ -179,6 +179,7 @@
   #crowdsec-whitelist-body tr.wl-row-ip td:first-child{ border-left: 3px solid var(--accent-info); }
   #crowdsec-whitelist-body tr.wl-row-cidr td:first-child{ border-left: 3px solid var(--accent-amber); }
   .badge.info{ background: rgba(91,157,255,.12); color: var(--accent-info); }
+  .badge.intern{ background: rgba(160,160,160,.15); color: var(--muted); }
 
   /* Gleiches Ellipsis-statt-Umbruch-Muster wie .path-cell (siehe dort), fuer
      lange Freitext-Notizen an einem Whitelist-Eintrag. */
@@ -349,7 +350,7 @@
     white-space:nowrap; vertical-align:bottom;
   }
 
-  .mini-kpis{ display:flex; gap:18px; margin-bottom:12px; }
+  .mini-kpis{ display:flex; flex-wrap:wrap; gap:18px; margin-bottom:12px; }
   .mini-kpi .label{ color: var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.07em; }
   .mini-kpi .value{ font-family: var(--mono); font-size:18px; font-weight:600; }
   .table-compact .table-wrap{ max-height: 260px; }
@@ -460,9 +461,19 @@
 
   <div class="section-title" id="sec-crowdsec">CrowdSec</div>
   <div class="card" style="margin-bottom:14px;" id="crowdsec-current-card">
-    <h2>CrowdSec · Aktuell blockierte IPs</h2>
+    <h2>Aktuell blockierte IPs · CrowdSec + BunkerWeb</h2>
     <div class="mini-kpis">
       <div class="mini-kpi"><div class="label">Aktive Blocks</div><div class="value" id="cs-active-count">–</div></div>
+      <div class="mini-kpi"><div class="label">davon CrowdSec</div><div class="value" id="cs-active-count-cs">–</div></div>
+      <div class="mini-kpi"><div class="label">davon BunkerWeb</div><div class="value" id="cs-active-count-bw">–</div></div>
+      <div class="mini-kpi" style="margin-left:auto;align-self:flex-end;">
+        <div class="label" style="margin-bottom:4px;">Quelle anzeigen</div>
+        <div class="range-select" id="ban-source-select">
+          <button type="button" data-source="all" class="active">Alle</button>
+          <button type="button" data-source="crowdsec">CrowdSec</button>
+          <button type="button" data-source="bunkerweb">BunkerWeb</button>
+        </div>
+      </div>
     </div>
     <div class="reason-legend" id="cs-reason-legend">
       <span class="reason-legend-label">Symbole (anklicken zum Filtern):</span>
@@ -475,7 +486,7 @@
     <div class="table-wrap" style="max-height:280px;">
       <table>
         <thead>
-          <tr><th>IP</th><th>Land</th><th>Provider (AS)</th><th>Gründe</th><th>Events</th><th>Blockiert seit</th><th>Läuft ab in</th><th>Aktionen</th></tr>
+          <tr><th>Quelle</th><th>IP</th><th>Land</th><th>Provider (AS)</th><th>Gründe</th><th>Events</th><th>Blockiert seit</th><th>Läuft ab in</th><th>Aktionen</th></tr>
         </thead>
         <tbody id="crowdsec-current-body"></tbody>
       </table>
@@ -693,7 +704,7 @@ let charts = {};
 // proxy_events, ein anderes Feld auf einer anderen Tabelle). Wird nur an die
 // beiden CrowdSec-Endpunkte durchgereicht, /api/stats und /api/events
 // ignorieren einen ihnen unbekannten Query-Param einfach.
-let filters = { host: [], country: [], ip: [], asn: [], status: null, bucket: null, status_code: null, reason: [], path: [], city: [], user_id: [], cs_scenario: [] };
+let filters = { host: [], country: [], ip: [], asn: [], status: null, bucket: null, status_code: null, reason: [], path: [], city: [], user_id: [], cs_scenario: [], blocker: null };
 const MULTI_VALUE_KEYS = new Set(["host","country","ip","asn","reason","path","city","user_id","cs_scenario"]);
 // AS-Nummer -> Anzeigename, nur fuer Chip-/Legenden-Anzeige - kein eigener
 // Backend-Filter (im Unterschied zu asn selbst), deshalb separat statt in
@@ -705,7 +716,7 @@ let asnLabels = {};
 // klickbaren Wert in einer Tabelle/Chart. Gilt fuer den gesamten Wertesatz
 // eines Keys auf einmal, nicht pro Einzelwert (siehe toggleFilterValue()).
 let excludedFilters = new Set();
-const BACKEND_FILTER_KEYS = new Set(["host","country","ip","asn","status","bucket","status_code","reason","path","city","user_id","cs_scenario"]);
+const BACKEND_FILTER_KEYS = new Set(["host","country","ip","asn","status","bucket","status_code","reason","path","city","user_id","cs_scenario","blocker"]);
 
 function applyExcludeState(keys, exclude){
   keys.forEach(k => {
@@ -731,6 +742,7 @@ const BUCKET_LABELS = {
   "5xx": "5xx Server-Fehler", "n/a": "n/a", "sonstige": "Sonstige"
 };
 const STATUS_LABELS = { "allowed": "Erlaubt", "denied": "Blockiert" };
+const BLOCKER_LABELS = { "crowdsec": "CrowdSec", "bunkerweb": "BunkerWeb" };
 const CROWDSEC_SCENARIO_LABELS = {
   "netbird-proxy/auth-bruteforce": "Auth Brute-Force",
   "netbird-proxy/access-denied-flood": "Zugriffsverweigerungs-Flut",
@@ -772,6 +784,20 @@ const UNKNOWN_CITY = "(unbekannt)";
 const INTERNAL_CITY = "Internes Netzwerk (LAN)";
 const NBM_CITY = "NetBird-Mesh";
 
+// Anfragen von diesem Server selbst (Docker-Netze 172.16.0.0/12, Loopback):
+// Traefik sieht dann das Docker-Gateway (z.B. 172.30.0.1) als Client - das sind
+// eigene Tests/Checks, keine Besucher aus dem Internet.
+function isInternalIp(ip){
+  if (!ip) return false;
+  const m = /^(\d+)\.(\d+)\./.exec(ip);
+  if (m) return m[1] === "127" || (m[1] === "172" && +m[2] >= 16 && +m[2] <= 31);
+  return ip === "::1";
+}
+function internalBadge(ip){
+  return isInternalIp(ip)
+    ? ` <span class="badge intern" title="Anfrage von diesem Server selbst (Docker-Netz) – eigene Tests/Checks, kein externer Besucher">intern</span>`
+    : "";
+}
 function escapeHtml(value){
   if(value === null || value === undefined) return "";
   return String(value).replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[ch]));
@@ -1008,8 +1034,10 @@ function renderFilterChips(){
   if(filters.city.length) chips.push(chipHtml("city", "Stadt", filters.city.map(escapeHtml).join(", ")));
   if(filters.user_id.length) chips.push(chipHtml("user_id", "User", filters.user_id.map(u => `${userSymbol(u)} ${escapeHtml(u)}`).join(", ")));
   if(filters.cs_scenario.length) chips.push(chipHtml("cs_scenario", "CrowdSec-Grund", filters.cs_scenario.map(s => `${CROWDSEC_SCENARIO_ICONS[s] || "❔"} ${escapeHtml(crowdsecReasonLabel(s))}`).join(", ")));
+  if(filters.blocker) chips.push(chipHtml("blocker", "Blockiert durch", BLOCKER_LABELS[filters.blocker] || escapeHtml(filters.blocker)));
   if(chips.length > 1) chips.push(`<span class="chip clear-all" data-clear="all">Alle Filter zurücksetzen ✕</span>`);
   el.innerHTML = chips.join("");
+  syncBanSourceButtons();
   document.getElementById("filter-bar").classList.toggle("has-filters", chips.length > 0);
   updateChQuickFilterButton();
 }
@@ -1041,6 +1069,7 @@ function appendFilterParams(params){
   if(filters.city.length) params.set("city", filters.city.join(","));
   if(filters.user_id.length) params.set("user_id", filters.user_id.join(","));
   if(filters.cs_scenario.length) params.set("cs_scenario", filters.cs_scenario.join(","));
+  if(filters.blocker) params.set("blocker", filters.blocker);
   if(excludedFilters.size) params.set("exclude", Array.from(excludedFilters).join(","));
 }
 
@@ -1231,7 +1260,7 @@ function renderAnomalies(anomalies){
     if(a.type === "ip_deny_spike"){
       return `<div class="anomaly critical">
         <span class="tag">Denies</span>
-        <span><b>${escapeHtml(a.source_ip)}</b> wurde ${a.count.toLocaleString("de-CH")}× blockiert im gewählten Zeitraum</span>
+        <span><b>${escapeHtml(a.source_ip)}</b>${internalBadge(a.source_ip)} wurde ${a.count.toLocaleString("de-CH")}× blockiert im gewählten Zeitraum</span>
         <button type="button" data-filter-key="ip" data-filter-value="${escapeHtml(a.source_ip)}">Filtern</button>
       </div>`;
     }
@@ -1542,7 +1571,7 @@ async function loadStats(){
   renderBarOrEmpty("chart-ips", "ips", data.top_ips, () => ({
     type: "bar",
     data: {
-      labels: data.top_ips.map(r=>r.source_ip),
+      labels: data.top_ips.map(r=>isInternalIp(r.source_ip) ? `${r.source_ip} (intern)` : r.source_ip),
       datasets: [{ label:"Requests", data: data.top_ips.map(r=>r.c), backgroundColor:"#3ddc97" }]
     },
     options: baseOptions({ indexAxis:"y", plugins:{legend:{display:false}}, onClick: (evt, elements) => {
@@ -1667,7 +1696,7 @@ async function loadEvents(){
           (e.bunkerweb.blocked ? "Von BunkerWeb beantwortet, nie bei NetBird angekommen" : "Über BunkerWeb – echte Client-IP aus dem BunkerWeb-Log")
           + (e.bunkerweb.user_agent ? "\nUser-Agent: " + e.bunkerweb.user_agent : ""))}">BW</span>`
       : "";
-    const ipCell = (e.source_ip ? `<span class="clickable" data-filter-key="ip" data-filter-value="${escapeHtml(e.source_ip)}">${escapeHtml(e.source_ip)}</span>` : "") + bwBadge;
+    const ipCell = (e.source_ip ? `<span class="clickable" data-filter-key="ip" data-filter-value="${escapeHtml(e.source_ip)}">${escapeHtml(e.source_ip)}</span>` : "") + internalBadge(e.source_ip) + bwBadge;
     const countryCell = e.country_code ? `<span class="clickable" data-filter-key="country" data-filter-value="${escapeHtml(e.country_code)}">${countryLabel(e.country_code)}</span>` : "";
     const asnCell = asnCellHtml(e.as_number, e.as_name);
     const userCell = userCellHtml(e.user_id);
@@ -1701,44 +1730,116 @@ document.getElementById("events-body").addEventListener("click", (ev) => {
   handleFilterClick(el, ev);
 });
 
+// BunkerWeb-Sperrgruende (reason aus der BunkerWeb-API) lesbar machen.
+const BUNKERWEB_REASON_LABELS = {
+  "bad behavior": "Bad Behavior (zu viele Fehler-Antworten)",
+  "limit": "Rate-Limit",
+  "antibot": "Antibot",
+  "dnsbl": "DNSBL",
+  "blacklist": "Blacklist",
+  "country": "Land",
+  "modsecurity": "WAF",
+  "manual": "manuell",
+};
+function bunkerwebReasonHtml(reasons){
+  return (reasons || []).map(r => `<span class="badge warn" title="BunkerWeb-Sperrgrund">${escapeHtml(BUNKERWEB_REASON_LABELS[r] || r)}</span>`).join(" ") || "–";
+}
+
+// Buttons "Alle / CrowdSec / BunkerWeb" in der Ban-Karte = globaler Filter
+// "Blockiert durch" (filters.blocker): wirkt auf Stats, Charts, Events und
+// beide Ban-Tabellen, erscheint als Chip und ist dort auch invertierbar.
+function syncBanSourceButtons(){
+  let shown = filters.blocker || "all";
+  // NICHT CrowdSec = nur BunkerWeb (und umgekehrt) - so anzeigen.
+  if(filters.blocker && excludedFilters.has("blocker")) shown = filters.blocker === "crowdsec" ? "bunkerweb" : "crowdsec";
+  document.querySelectorAll("#ban-source-select button").forEach(b =>
+    b.classList.toggle("active", b.dataset.source === shown));
+}
+document.getElementById("ban-source-select").addEventListener("click", (ev) => {
+  const btn = ev.target.closest("button[data-source]");
+  if(!btn) return;
+  if(btn.dataset.source === "all"){ clearFilter("blocker"); return; }
+  filters.blocker = btn.dataset.source;
+  excludedFilters.delete("blocker");
+  renderFilterChips();
+  refreshAll();
+});
+
 async function loadCrowdsecCurrent(){
   const body = document.getElementById("crowdsec-current-body");
+  const setCount = (id, n) => { document.getElementById(id).textContent = n == null ? "–" : n.toLocaleString("de-CH"); };
   try{
     const params = new URLSearchParams();
     appendFilterParams(params);
-    const res = await fetch(`/api/crowdsec/current?${params.toString()}`);
-    const data = await res.json();
-    document.getElementById("cs-active-count").textContent = data.decisions.length.toLocaleString("de-CH");
+    // Beide Quellen parallel; faellt eine aus, zeigt die Tabelle die andere trotzdem.
+    const [csRes, bwRes] = await Promise.allSettled([
+      fetch(`/api/crowdsec/current?${params.toString()}`).then(r => r.json()),
+      fetch(`/api/bunkerweb/bans?${params.toString()}`).then(r => r.json()),
+    ]);
+    const cs = csRes.status === "fulfilled" ? csRes.value : null;
+    const bw = bwRes.status === "fulfilled" ? bwRes.value : null;
+    const csRows = (cs && cs.configured) ? (cs.decisions || []).map(d => ({...d, source: "crowdsec"})) : [];
+    // Der Szenario-Filter ist CrowdSec-spezifisch -> BunkerWeb-Bans dann ausblenden.
+    const bwRows = (bw && bw.configured && !filters.cs_scenario.length) ? (bw.bans || []).map(d => ({...d, source: "bunkerweb"})) : [];
+    setCount("cs-active-count-cs", cs && cs.configured && !cs.hidden_by_filter ? csRows.length : null);
+    setCount("cs-active-count-bw", bw && bw.configured && !bw.hidden_by_filter ? bwRows.length : null);
+    setCount("cs-active-count", csRows.length + bwRows.length);
 
-    if(!data.configured){
-      body.innerHTML = `<tr><td colspan="8" style="color:var(--muted)">CrowdSec-Integration nicht konfiguriert</td></tr>`;
-      return;
-    }
-    if(!data.decisions.length){
-      body.innerHTML = `<tr><td colspan="8" style="color:var(--muted)">Aktuell keine aktiven CrowdSec-Blockierungen</td></tr>`;
+    const notes = [];
+    if(!cs) notes.push("CrowdSec: Fehler beim Laden");
+    else if(!cs.configured) notes.push("CrowdSec-Integration nicht konfiguriert");
+    if(bw && bw.error) notes.push(`BunkerWeb: ${bw.error}`);
+    else if(!bw) notes.push("BunkerWeb: Fehler beim Laden");
+    const noteRow = notes.length ? `<tr><td colspan="9" style="color:var(--muted)">${escapeHtml(notes.join(" · "))}</td></tr>` : "";
+
+    const rows = [...csRows, ...bwRows].sort((a, b) => (b.last_seen || "").localeCompare(a.last_seen || ""));
+    if(!rows.length){
+      const what = (cs && cs.hidden_by_filter) ? "BunkerWeb-" : (bw && bw.hidden_by_filter) ? "CrowdSec-" : "";
+      body.innerHTML = noteRow + `<tr><td colspan="9" style="color:var(--muted)">Aktuell keine aktiven ${what}Blockierungen</td></tr>`;
       return;
     }
     const now = Date.now();
-    body.innerHTML = data.decisions.map(d => {
-      const remainingS = (new Date(d.expires_at).getTime() - now) / 1000;
+    body.innerHTML = noteRow + rows.map(d => {
+      const isBw = d.source === "bunkerweb";
+      const remaining = d.expires_at ? formatDurationShort((new Date(d.expires_at).getTime() - now) / 1000) : "permanent";
       const ip = escapeHtml(d.source_ip || "");
+      const sourceBadge = `<span class="badge ${isBw ? "warn" : "info"} clickable" data-filter-key="blocker" data-filter-value="${d.source}" title="Seite nach dieser Quelle filtern">${isBw ? "BunkerWeb" : "CrowdSec"}</span>`;
+      const reasons = isBw
+        ? `${bunkerwebReasonHtml(d.reasons)}<div style="color:var(--muted);font-size:11px;margin-top:2px">${(d.services || []).map(s => s === "alle Domains" ? escapeHtml(s) : `<span class="clickable" data-filter-key="host" data-filter-value="${escapeHtml(s)}">${escapeHtml(s)}</span>`).join(", ")}</div>`
+        : crowdsecReasonIconsHtml(d.scenarios || []);
+      const actions = isBw
+        ? `<button type="button" class="action-btn danger" data-action="bw-unban" data-ip="${ip}" title="Sperre in BunkerWeb aufheben (alle Domains dieser IP)">Ban löschen</button>`
+        : `<button type="button" class="action-btn danger" data-action="unban" data-ip="${ip}">Ban löschen</button>
+          <button type="button" class="action-btn primary" data-action="whitelist" data-ip="${ip}" data-country="${escapeHtml(d.country_code || "")}">Whitelisten</button>`;
       return `<tr>
-        <td><span class="clickable" data-filter-key="ip" data-filter-value="${ip}">${ip}</span></td>
+        <td>${sourceBadge}</td>
+        <td><span class="clickable" data-filter-key="ip" data-filter-value="${ip}">${ip}</span>${internalBadge(d.source_ip)}</td>
         <td>${d.country_code ? `<span class="clickable" data-filter-key="country" data-filter-value="${escapeHtml(d.country_code)}">${countryLabel(d.country_code)}</span>` : "–"}</td>
         <td>${asnCellHtml(d.as_number, d.as_name)}</td>
-        <td>${crowdsecReasonIconsHtml(d.scenarios || [])}</td>
+        <td>${reasons}</td>
         <td>${d.events_count ?? "–"}</td>
         <td>${escapeHtml(fmtTime(d.first_seen))}</td>
-        <td>${formatDurationShort(remainingS)}</td>
-        <td>
-          <button type="button" class="action-btn danger" data-action="unban" data-ip="${ip}">Ban löschen</button>
-          <button type="button" class="action-btn primary" data-action="whitelist" data-ip="${ip}" data-country="${escapeHtml(d.country_code || "")}">Whitelisten</button>
-        </td>
+        <td>${remaining}</td>
+        <td>${actions}</td>
       </tr>`;
     }).join("");
   }catch(e){
-    console.warn("CrowdSec-Status konnte nicht geladen werden", e);
-    body.innerHTML = `<tr><td colspan="8" style="color:var(--muted)">Fehler beim Laden</td></tr>`;
+    console.warn("Block-Status konnte nicht geladen werden", e);
+    body.innerHTML = `<tr><td colspan="9" style="color:var(--muted)">Fehler beim Laden</td></tr>`;
+  }
+}
+
+async function unbanBunkerwebIp(ip, btn){
+  if(!confirm(`BunkerWeb-Sperre für ${ip} jetzt aufheben?`)) return;
+  btn.disabled = true;
+  try{
+    const res = await fetch(`/api/bunkerweb/ban/${encodeURIComponent(ip)}`, { method: "DELETE" });
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.error || "Unbekannter Fehler");
+    loadCrowdsecCurrent();
+  }catch(e){
+    alert(`BunkerWeb-Ban löschen fehlgeschlagen: ${e.message}`);
+    btn.disabled = false;
   }
 }
 
@@ -1759,6 +1860,8 @@ document.getElementById("crowdsec-current-body").addEventListener("click", async
 
   if(action === "unban"){
     await unbanIp(ip, btn);
+  } else if(action === "bw-unban"){
+    await unbanBunkerwebIp(ip, btn);
   } else if(action === "whitelist"){
     if(!confirm(`${ip} whitelisten und aktiven Ban sofort löschen?\n\n(Die Whitelist wird erst wirksam, nachdem du sie im Whitelist-Widget mit "Anwenden" bestätigst.)`)) return;
     btn.disabled = true;
@@ -1796,11 +1899,15 @@ async function loadCrowdsecHistory(){
       body.innerHTML = `<tr><td colspan="7" style="color:var(--muted)">CrowdSec-Integration nicht konfiguriert</td></tr>`;
       return;
     }
+    if(data.hidden_by_filter){
+      body.innerHTML = `<tr><td colspan="7" style="color:var(--muted)">Ausgeblendet durch den Filter „Blockiert durch“</td></tr>`;
+      return;
+    }
     body.innerHTML = data.alerts.length ? data.alerts.map(a => {
       const statusBadge = a.is_active ? `<span class="badge deny">aktiv</span>` : `<span class="badge">abgelaufen</span>`;
       return `<tr>
         <td>${escapeHtml(fmtTime(a.created_at))}</td>
-        <td><span class="clickable" data-filter-key="ip" data-filter-value="${escapeHtml(a.source_ip)}">${escapeHtml(a.source_ip || "")}</span></td>
+        <td><span class="clickable" data-filter-key="ip" data-filter-value="${escapeHtml(a.source_ip)}">${escapeHtml(a.source_ip || "")}</span>${internalBadge(a.source_ip)}</td>
         <td>${a.country_code ? `<span class="clickable" data-filter-key="country" data-filter-value="${escapeHtml(a.country_code)}">${countryLabel(a.country_code)}</span>` : "–"}</td>
         <td>${asnCellHtml(a.as_number, a.as_name)}</td>
         <td>${a.scenario ? `<span class="clickable" data-filter-key="cs_scenario" data-filter-value="${escapeHtml(a.scenario)}">${escapeHtml(crowdsecReasonLabel(a.scenario))}</span>` : "–"}</td>

@@ -2089,6 +2089,34 @@ def apply_common_filters(args, where_clauses, params):
 
     add_multi("city", city, city_clause)
 
+    blocker = args.get("blocker", "").strip()
+    if blocker in BLOCKER_CONDITIONS:
+        add("blocker", BLOCKER_CONDITIONS[blocker])
+
+
+# Globaler Filter "Blockiert durch": welche Instanz einen Request abgewiesen hat.
+# CrowdSec blockiert an zwei Stellen - im netbird-proxy (metadata.crowdsec_verdict)
+# und ueber den CrowdSec-Bouncer in BunkerWeb ("BunkerWeb: crowdsec: ...").
+# Alle uebrigen von BunkerWeb beantworteten Requests zaehlen als BunkerWeb-Block,
+# ausser reinen Fehlern (Client-Abbruch 499, Backend 5xx), die kein Block sind.
+BLOCKER_CONDITIONS = {
+    "crowdsec": "(metadata LIKE '%\"crowdsec_verdict\": \"crowdsec_ban\"%' OR reason LIKE 'BunkerWeb: crowdsec:%')",
+    "bunkerweb": (
+        "(reason LIKE 'BunkerWeb%' AND reason NOT LIKE 'BunkerWeb: crowdsec:%' "
+        "AND reason NOT LIKE 'BunkerWeb: Fehler 499' AND reason NOT LIKE 'BunkerWeb: Fehler 5%')"
+    ),
+}
+
+
+def blocker_allows(args, source):
+    """Fuer die Ban-Tabellen: passt die Quelle (crowdsec/bunkerweb) zum globalen
+    Filter "Blockiert durch" (inkl. NICHT-Variante)?"""
+    blocker = args.get("blocker", "").strip()
+    if blocker not in BLOCKER_CONDITIONS:
+        return True
+    excluded = "blocker" in {k for k in args.get("exclude", "").split(",") if k}
+    return (blocker == source) != excluded
+
 
 def apply_crowdsec_scenario_filter(args, where_clauses, params):
     """Filters crowdsec_alerts.scenario (the block reason shown as icons in
@@ -2122,6 +2150,9 @@ def crowdsec_source_ip_filter(args, cutoff=None, until=None):
     collections) still show up by default.
     """
     filter_where, filter_params = [], []
+    # "Blockiert durch" filtert die Ban-Quelle selbst (blocker_allows), nicht die
+    # IPs ueber proxy_events - sonst verschwaenden CrowdSec-Bans ohne Proxy-Event.
+    args = {k: v for k, v in args.items() if k != "blocker"}
     apply_common_filters(args, filter_where, filter_params)
     if not filter_where:
         return None, []
@@ -2516,6 +2547,8 @@ def api_crowdsec_current():
     Ablaufdatum noch in der Zukunft liegt - das "wer ist JETZT gerade blockiert".
     Pro IP zu einer Zeile zusammengefasst, weil dieselbe IP oft mehrere Szenarien
     gleichzeitig ausloest (z.B. auth-bruteforce + sensitive-path-scan)."""
+    if not blocker_allows(request.args, "crowdsec"):
+        return jsonify(configured=CROWDSEC_CONFIGURED, decisions=[], hidden_by_filter=True)
     conn = get_conn()
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     where_clauses = ["expires_at IS NOT NULL", "expires_at > ?"]
@@ -2566,6 +2599,8 @@ def api_crowdsec_current():
 def api_crowdsec_history():
     """Verlauf aller je gesehenen CrowdSec-Bans (auch abgelaufene) - haelt laenger
     vor als CrowdSecs eigene ~7-Tage-Historie, siehe sync_crowdsec()."""
+    if not blocker_allows(request.args, "crowdsec"):
+        return jsonify(configured=CROWDSEC_CONFIGURED, alerts=[], hidden_by_filter=True)
     range_key = request.args.get("range", "24h")
     cutoff, until = resolve_range(range_key, request.args)
     search = request.args.get("search", "").strip()
@@ -2647,6 +2682,131 @@ def api_crowdsec_delete_ban(ip):
     if errors and not deleted:
         return jsonify(error="; ".join(errors)), 502
     return jsonify(ok=True, deleted_decision_ids=deleted, errors=errors)
+
+
+# --- BunkerWeb-Bans ---
+# BunkerWeb sperrt IPs selbst (Bad Behavior, Rate-Limits, ...), unabhaengig von
+# CrowdSec. Die Sperren liegen nur in der BunkerWeb-Instanz; ihre API ist bewusst
+# nur lokal bzw. im bw-universe-Netz erreichbar, darum per docker exec + curl im
+# Container (wie die Health-Abfrage der Domains-Seite).
+BUNKERWEB_API_URL = "http://127.0.0.1:5000"
+
+
+def bunkerweb_api(method, path, payload=None):
+    container = docker_sdk.from_env().containers.get(BUNKERWEB_CONTAINER_NAME)
+    cmd = ["curl", "-s", "-m", "10", "-H", "Host: bwapi", "-X", method]
+    if payload is not None:
+        cmd += ["-H", "Content-Type: application/json", "--data-binary", json.dumps(payload)]
+    cmd.append(BUNKERWEB_API_URL + path)
+    res = container.exec_run(cmd)
+    if res.exit_code != 0:
+        raise RuntimeError(f"BunkerWeb-API nicht erreichbar (curl exit {res.exit_code})")
+    try:
+        data = json.loads(res.output.decode("utf-8", "replace"))
+    except ValueError:
+        raise RuntimeError("BunkerWeb-API: ungueltige Antwort")
+    if data.get("status") != "success":
+        raise RuntimeError(f"BunkerWeb-API: {data.get('msg') or 'Fehler'}")
+    return data
+
+
+def _csv_arg(args, key):
+    return {v.strip() for v in (args.get(key) or "").split(",") if v.strip()}
+
+
+@app.route("/api/bunkerweb/bans")
+def api_bunkerweb_bans():
+    """Aktive BunkerWeb-Sperren, pro IP zusammengefasst (eine IP kann auf
+    mehreren Domains gesperrt sein). Beachtet die Cross-Filter ip, country
+    und host (= gesperrte Domain) der Seite."""
+    if not BUNKERWEB_CONTAINER_NAME:
+        return jsonify(configured=False, bans=[])
+    if not blocker_allows(request.args, "bunkerweb"):
+        return jsonify(configured=True, bans=[], hidden_by_filter=True)
+    try:
+        raw = bunkerweb_api("GET", "/bans").get("data") or []
+    except Exception as exc:  # Container weg, API down, ...
+        log.warning("BunkerWeb-Bans konnten nicht gelesen werden: %s", exc)
+        return jsonify(configured=True, error=str(exc), bans=[]), 502
+
+    f_ip, f_country, f_host = _csv_arg(request.args, "ip"), _csv_arg(request.args, "country"), _csv_arg(request.args, "host")
+    now = time.time()
+    by_ip = {}
+    for b in raw:
+        ip = b.get("ip")
+        if not ip or b.get("kind", "ban") != "ban":
+            continue
+        service = b.get("service") or ""
+        country = (b.get("country") or "").upper() or None
+        if f_ip and ip not in f_ip:
+            continue
+        if f_country and (country or "") not in f_country:
+            continue
+        if f_host and service not in f_host:
+            continue
+        start = b.get("date")
+        expires = None if b.get("permanent") or b.get("exp") in (None, -1) else now + float(b.get("exp") or 0)
+        rd = b.get("reason_data") or {}
+        e = by_ip.get(ip)
+        if e is None:
+            as_number, as_name = lookup_asn(ip)
+            e = by_ip[ip] = {
+                "source_ip": ip, "country_code": country, "as_number": as_number, "as_name": as_name,
+                "reasons": [], "services": [], "events_count": 0,
+                "first_seen": start, "last_seen": start, "expires_ts": expires, "permanent": False,
+            }
+        if b.get("reason") and b["reason"] not in e["reasons"]:
+            e["reasons"].append(b["reason"])
+        scope = b.get("ban_scope") or "global"
+        label = service if scope == "service" and service else "alle Domains"
+        if label not in e["services"]:
+            e["services"].append(label)
+        e["events_count"] += int(rd.get("event_count") or rd.get("counter") or 0)
+        if start:
+            e["first_seen"] = min(e["first_seen"] or start, start)
+            e["last_seen"] = max(e["last_seen"] or start, start)
+        if expires is None:
+            e["permanent"] = True
+        else:
+            e["expires_ts"] = max(e["expires_ts"] or 0, expires)
+
+    def iso(ts):
+        return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if ts else None
+
+    bans = []
+    for e in by_ip.values():
+        expires_ts = e.pop("expires_ts")
+        e["first_seen"], e["last_seen"] = iso(e["first_seen"]), iso(e["last_seen"])
+        e["expires_at"] = None if e["permanent"] else iso(expires_ts)
+        bans.append(e)
+    bans.sort(key=lambda d: d["last_seen"] or "", reverse=True)
+    return jsonify(configured=True, bans=bans)
+
+
+@app.route("/api/bunkerweb/ban/<ip>", methods=["DELETE"])
+def api_bunkerweb_delete_ban(ip):
+    """Hebt alle aktiven BunkerWeb-Sperren einer IP auf (jede Domain-Sperre einzeln)."""
+    if not BUNKERWEB_CONTAINER_NAME:
+        return jsonify(error="BunkerWeb ist nicht konfiguriert"), 400
+    try:
+        ip = str(ipaddress.ip_address(ip))
+    except ValueError:
+        return jsonify(error="ungueltige IP-Adresse"), 400
+    try:
+        current = [b for b in (bunkerweb_api("GET", "/bans").get("data") or []) if b.get("ip") == ip]
+        targets = [{"ban_scope": b.get("ban_scope") or "global", "service": b.get("service")} for b in current] \
+            or [{"ban_scope": "global", "service": None}]
+        done = []
+        for t in targets:
+            payload = {"ip": ip, "ban_scope": t["ban_scope"]}
+            if t["ban_scope"] == "service" and t["service"]:
+                payload["service"] = t["service"]
+            bunkerweb_api("POST", "/unban", payload)
+            done.append(payload.get("service") or "global")
+    except Exception as exc:
+        return jsonify(error=str(exc)), 502
+    log.info("BunkerWeb-Ban(s) fuer %s geloescht: %s", ip, ", ".join(done))
+    return jsonify(ok=True, unbanned=done)
 
 
 @app.route("/api/crowdsec/fp-criteria", methods=["GET"])
