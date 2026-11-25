@@ -463,7 +463,7 @@
   <div class="card" style="margin-bottom:14px;" id="crowdsec-current-card">
     <h2>Aktuell blockierte IPs · CrowdSec + BunkerWeb</h2>
     <div class="mini-kpis">
-      <div class="mini-kpi"><div class="label">Aktive Blocks</div><div class="value" id="cs-active-count">–</div></div>
+      <div class="mini-kpi"><div class="label">Gesperrte IPs</div><div class="value" id="cs-active-count">–</div></div>
       <div class="mini-kpi"><div class="label">davon CrowdSec</div><div class="value" id="cs-active-count-cs">–</div></div>
       <div class="mini-kpi"><div class="label">davon BunkerWeb</div><div class="value" id="cs-active-count-bw">–</div></div>
       <div class="mini-kpi" style="margin-left:auto;align-self:flex-end;">
@@ -1783,7 +1783,26 @@ async function loadCrowdsecCurrent(){
     const bwRows = (bw && bw.configured && !filters.cs_scenario.length) ? (bw.bans || []).map(d => ({...d, source: "bunkerweb"})) : [];
     setCount("cs-active-count-cs", cs && cs.configured && !cs.hidden_by_filter ? csRows.length : null);
     setCount("cs-active-count-bw", bw && bw.configured && !bw.hidden_by_filter ? bwRows.length : null);
-    setCount("cs-active-count", csRows.length + bwRows.length);
+
+    // Pro IP zusammenfassen: von CrowdSec UND BunkerWeb gebannte IPs als eine Zeile.
+    const byIp = new Map();
+    for(const d of [...csRows, ...bwRows]){
+      const key = d.source_ip || "";
+      const m = byIp.get(key) || { source_ip: d.source_ip, sources: [] };
+      m.sources.push(d.source);
+      m[d.source] = d;
+      m.country_code = m.country_code || d.country_code;
+      m.as_number = m.as_number || d.as_number;
+      m.as_name = m.as_name || d.as_name;
+      m.events_count = (m.events_count || 0) + (d.events_count || 0);
+      if(d.first_seen && (!m.first_seen || d.first_seen < m.first_seen)) m.first_seen = d.first_seen;
+      if(d.last_seen && (!m.last_seen || d.last_seen > m.last_seen)) m.last_seen = d.last_seen;
+      // Ablauf: der laengste Ban zaehlt, permanent (null) schlaegt alles.
+      if(!("expires_at" in m)) m.expires_at = d.expires_at;
+      else if(m.expires_at && (!d.expires_at || d.expires_at > m.expires_at)) m.expires_at = d.expires_at;
+      byIp.set(key, m);
+    }
+    setCount("cs-active-count", byIp.size);
 
     const notes = [];
     if(!cs) notes.push("CrowdSec: Fehler beim Laden");
@@ -1792,7 +1811,7 @@ async function loadCrowdsecCurrent(){
     else if(!bw) notes.push("BunkerWeb: Fehler beim Laden");
     const noteRow = notes.length ? `<tr><td colspan="9" style="color:var(--muted)">${escapeHtml(notes.join(" · "))}</td></tr>` : "";
 
-    const rows = [...csRows, ...bwRows].sort((a, b) => (b.last_seen || "").localeCompare(a.last_seen || ""));
+    const rows = [...byIp.values()].sort((a, b) => (b.last_seen || "").localeCompare(a.last_seen || ""));
     if(!rows.length){
       const what = (cs && cs.hidden_by_filter) ? "BunkerWeb-" : (bw && bw.hidden_by_filter) ? "CrowdSec-" : "";
       body.innerHTML = noteRow + `<tr><td colspan="9" style="color:var(--muted)">Aktuell keine aktiven ${what}Blockierungen</td></tr>`;
@@ -1800,24 +1819,36 @@ async function loadCrowdsecCurrent(){
     }
     const now = Date.now();
     body.innerHTML = noteRow + rows.map(d => {
-      const isBw = d.source === "bunkerweb";
+      const cs = d.crowdsec, bw = d.bunkerweb, both = !!(cs && bw);
       const remaining = d.expires_at ? formatDurationShort((new Date(d.expires_at).getTime() - now) / 1000) : "permanent";
       const ip = escapeHtml(d.source_ip || "");
-      const sourceBadge = `<span class="badge ${isBw ? "warn" : "info"} clickable" data-filter-key="blocker" data-filter-value="${d.source}" title="Seite nach dieser Quelle filtern">${isBw ? "BunkerWeb" : "CrowdSec"}</span>`;
-      const reasons = isBw
-        ? `${bunkerwebReasonHtml(d.reasons)}<div style="color:var(--muted);font-size:11px;margin-top:2px">${(d.services || []).map(s => s === "alle Domains" ? escapeHtml(s) : `<span class="clickable" data-filter-key="host" data-filter-value="${escapeHtml(s)}">${escapeHtml(s)}</span>`).join(", ")}</div>`
-        : crowdsecReasonIconsHtml(d.scenarios || []);
-      const actions = isBw
-        ? `<button type="button" class="action-btn danger" data-action="bw-unban" data-ip="${ip}" title="Sperre in BunkerWeb aufheben (alle Domains dieser IP)">Ban löschen</button>`
-        : `<button type="button" class="action-btn danger" data-action="unban" data-ip="${ip}">Ban löschen</button>
-          <button type="button" class="action-btn primary" data-action="whitelist" data-ip="${ip}" data-country="${escapeHtml(d.country_code || "")}">Whitelisten</button>`;
+      const srcBadge = (src) => `<span class="badge ${src === "bunkerweb" ? "warn" : "info"} clickable" data-filter-key="blocker" data-filter-value="${src}" title="Seite nach dieser Quelle filtern">${src === "bunkerweb" ? "BunkerWeb" : "CrowdSec"}</span>`;
+      const sourceBadge = (cs ? srcBadge("crowdsec") : "") + (both ? " " : "") + (bw ? srcBadge("bunkerweb") : "");
+      const bwReasons = bw
+        ? `${bunkerwebReasonHtml(bw.reasons)}<div style="color:var(--muted);font-size:11px;margin-top:2px">${(bw.services || []).map(s => s === "alle Domains" ? escapeHtml(s) : `<span class="clickable" data-filter-key="host" data-filter-value="${escapeHtml(s)}">${escapeHtml(s)}</span>`).join(", ")}</div>`
+        : "";
+      const csReasons = cs ? crowdsecReasonIconsHtml(cs.scenarios || []) : "";
+      const reasons = both
+        ? `<div><span style="color:var(--muted);font-size:11px">CrowdSec:</span> ${csReasons}</div><div style="margin-top:4px"><span style="color:var(--muted);font-size:11px">BunkerWeb:</span> ${bwReasons}</div>`
+        : csReasons + bwReasons;
+      const eventsCell = both
+        ? `<span title="CrowdSec: ${cs.events_count ?? 0} · BunkerWeb: ${bw.events_count ?? 0}">${d.events_count}</span>`
+        : (d.events_count ?? "–");
+      const unbanBtn = both
+        ? `<button type="button" class="action-btn danger" data-action="unban-all" data-ip="${ip}" title="Sperre in CrowdSec und BunkerWeb aufheben">Ban löschen</button>`
+        : bw
+          ? `<button type="button" class="action-btn danger" data-action="bw-unban" data-ip="${ip}" title="Sperre in BunkerWeb aufheben (alle Domains dieser IP)">Ban löschen</button>`
+          : `<button type="button" class="action-btn danger" data-action="unban" data-ip="${ip}">Ban löschen</button>`;
+      const actions = unbanBtn + (cs
+        ? `\n          <button type="button" class="action-btn primary" data-action="whitelist" data-ip="${ip}" data-country="${escapeHtml(d.country_code || "")}">Whitelisten</button>`
+        : "");
       return `<tr>
         <td>${sourceBadge}</td>
         <td><span class="clickable" data-filter-key="ip" data-filter-value="${ip}">${ip}</span>${internalBadge(d.source_ip)}</td>
         <td>${d.country_code ? `<span class="clickable" data-filter-key="country" data-filter-value="${escapeHtml(d.country_code)}">${countryLabel(d.country_code)}</span>` : "–"}</td>
         <td>${asnCellHtml(d.as_number, d.as_name)}</td>
         <td>${reasons}</td>
-        <td>${d.events_count ?? "–"}</td>
+        <td>${eventsCell}</td>
         <td>${escapeHtml(fmtTime(d.first_seen))}</td>
         <td>${remaining}</td>
         <td>${actions}</td>
@@ -1827,6 +1858,23 @@ async function loadCrowdsecCurrent(){
     console.warn("Block-Status konnte nicht geladen werden", e);
     body.innerHTML = `<tr><td colspan="9" style="color:var(--muted)">Fehler beim Laden</td></tr>`;
   }
+}
+
+// IP ist bei CrowdSec und BunkerWeb gebannt: beide Sperren mit einer Bestaetigung aufheben.
+async function unbanAllIp(ip, btn){
+  if(!confirm(`Ban für ${ip} in CrowdSec und BunkerWeb jetzt löschen?`)) return;
+  btn.disabled = true;
+  const errors = [];
+  for(const [label, url] of [["CrowdSec", `/api/crowdsec/ban/${encodeURIComponent(ip)}`], ["BunkerWeb", `/api/bunkerweb/ban/${encodeURIComponent(ip)}`]]){
+    try{
+      const res = await fetch(url, { method: "DELETE" });
+      const data = await res.json().catch(() => ({}));
+      if(!res.ok) errors.push(`${label}: ${data.error || res.status}`);
+    }catch(e){ errors.push(`${label}: ${e.message}`); }
+  }
+  loadCrowdsecCurrent();
+  loadStats();
+  if(errors.length){ alert(`Ban löschen teilweise fehlgeschlagen:\n${errors.join("\n")}`); btn.disabled = false; }
 }
 
 async function unbanBunkerwebIp(ip, btn){
@@ -1860,6 +1908,8 @@ document.getElementById("crowdsec-current-body").addEventListener("click", async
 
   if(action === "unban"){
     await unbanIp(ip, btn);
+  } else if(action === "unban-all"){
+    await unbanAllIp(ip, btn);
   } else if(action === "bw-unban"){
     await unbanBunkerwebIp(ip, btn);
   } else if(action === "whitelist"){
