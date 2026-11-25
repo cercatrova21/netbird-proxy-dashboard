@@ -178,6 +178,17 @@
      auf einen Blick erkennt statt die Typ-Spalte lesen zu muessen. */
   #crowdsec-whitelist-body tr.wl-row-ip td:first-child{ border-left: 3px solid var(--accent-info); }
   #crowdsec-whitelist-body tr.wl-row-cidr td:first-child{ border-left: 3px solid var(--accent-amber); }
+  #bw-whitelist-body tr.wl-row-ip td:first-child{ border-left: 3px solid var(--accent-info); }
+  #bw-whitelist-body tr.wl-row-cidr td:first-child{ border-left: 3px solid var(--accent-amber); }
+  .bwwl-scope{ display:flex; gap:14px; align-items:center; font-size:12.5px; margin-bottom:8px; flex-wrap:wrap; }
+  .bwwl-scope label{ display:flex; gap:5px; align-items:center; cursor:pointer; }
+  .bwwl-domains{ display:grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap:4px 12px;
+    max-height:180px; overflow:auto; padding:8px; border:1px solid var(--border); border-radius:6px;
+    background: var(--panel); margin-bottom:10px; font-family: var(--mono); font-size:12px; }
+  .bwwl-domains label{ display:flex; gap:6px; align-items:center; cursor:pointer; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+  .bwwl-job{ font-family: var(--mono); font-size:11.5px; color: var(--muted); white-space:pre-wrap;
+    max-height:140px; overflow:auto; background: var(--panel-2); border:1px solid var(--border);
+    border-radius:6px; padding:8px; margin-bottom:10px; }
   .badge.info{ background: rgba(91,157,255,.12); color: var(--accent-info); }
   .badge.intern{ background: rgba(160,160,160,.15); color: var(--muted); }
 
@@ -561,6 +572,63 @@
             <th style="width:150px;">Aktion</th>
           </tr></thead>
           <tbody id="crowdsec-whitelist-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 class="collapsible-header" id="bw-whitelist-toggle" role="button" tabindex="0" aria-expanded="false">
+      <span>BunkerWeb · Whitelist</span><span class="chevron">▾</span>
+    </h2>
+    <div class="collapsible-content" id="bw-whitelist-content">
+      <div class="filters" style="align-items:center;">
+        <button type="button" class="btn primary" id="bwwl-add-btn">+ Eintrag hinzufügen</button>
+        <span id="bwwl-dirty-note" style="display:none; color: var(--accent-amber); font-family: var(--mono); font-size:12px;">
+          ● Änderungen noch nicht angewendet
+        </span>
+        <button type="button" class="btn" id="bwwl-apply-btn" style="display:none;">Anwenden (BunkerWeb-Reload, ca. 3–4 Min.)</button>
+        <button type="button" class="btn" id="bwwl-discard-btn" style="display:none;">Verwerfen</button>
+      </div>
+      <div style="color:var(--muted); font-size:12px; margin:-4px 0 10px;">
+        Whitelistete IPs/Netze umgehen <b>alle</b> BunkerWeb-Prüfungen (WAF, Bans, Länder, Rate-Limits).
+        „Alle Domains“ gilt auch für künftig angelegte Domains.
+      </div>
+      <div class="bwwl-job" id="bwwl-job" style="display:none;"></div>
+
+      <div class="wl-form" id="bwwl-form" style="display:none;">
+        <div class="wl-form-grid" style="grid-template-columns: 1.3fr 2fr;">
+          <div class="wl-field">
+            <label for="bwwl-f-value">IP oder CIDR</label>
+            <input type="text" id="bwwl-f-value" placeholder="z. B. 1.2.3.4 oder 192.168.0.0/16" autocomplete="off">
+          </div>
+          <div class="wl-field">
+            <label for="bwwl-f-note">Notiz</label>
+            <input type="text" id="bwwl-f-note" placeholder="z. B. eigene IP zuhause, Büro, Monitoring …">
+          </div>
+        </div>
+        <div class="bwwl-scope">
+          <label><input type="radio" name="bwwl-scope" value="all" checked> Alle Domains</label>
+          <label><input type="radio" name="bwwl-scope" value="some"> Nur ausgewählte Domains</label>
+        </div>
+        <div class="bwwl-domains" id="bwwl-f-domains" style="display:none;"></div>
+        <div class="wl-form-actions">
+          <button type="button" class="btn primary" id="bwwl-f-save">Hinzufügen</button>
+          <button type="button" class="btn" id="bwwl-f-cancel">Abbrechen</button>
+          <span class="wl-form-error" id="bwwl-f-error"></span>
+        </div>
+      </div>
+
+      <div class="table-wrap" style="max-height:340px;">
+        <table>
+          <thead><tr>
+            <th style="width:70px;">Typ</th>
+            <th>Wert</th>
+            <th>Gilt für</th>
+            <th>Notiz</th>
+            <th style="width:150px;">Aktion</th>
+          </tr></thead>
+          <tbody id="bw-whitelist-body"></tbody>
         </table>
       </div>
     </div>
@@ -1839,9 +1907,10 @@ async function loadCrowdsecCurrent(){
         : bw
           ? `<button type="button" class="action-btn danger" data-action="bw-unban" data-ip="${ip}" title="Sperre in BunkerWeb aufheben (alle Domains dieser IP)">Ban löschen</button>`
           : `<button type="button" class="action-btn danger" data-action="unban" data-ip="${ip}">Ban löschen</button>`;
-      const actions = unbanBtn + (cs
-        ? `\n          <button type="button" class="action-btn primary" data-action="whitelist" data-ip="${ip}" data-country="${escapeHtml(d.country_code || "")}">Whitelisten</button>`
-        : "");
+      const wlSources = [cs ? "crowdsec" : "", bw ? "bunkerweb" : ""].filter(Boolean).join(",");
+      const wlTitle = both ? "In CrowdSec- und BunkerWeb-Whitelist aufnehmen und Bans löschen"
+        : bw ? "In BunkerWeb-Whitelist (alle Domains) aufnehmen und Ban löschen" : "In CrowdSec-Whitelist aufnehmen und Ban löschen";
+      const actions = unbanBtn + `\n          <button type="button" class="action-btn primary" data-action="whitelist" data-sources="${wlSources}" data-ip="${ip}" data-country="${escapeHtml(d.country_code || "")}" title="${wlTitle}">Whitelisten</button>`;
       return `<tr>
         <td>${sourceBadge}</td>
         <td><span class="clickable" data-filter-key="ip" data-filter-value="${ip}">${ip}</span>${internalBadge(d.source_ip)}</td>
@@ -1913,19 +1982,34 @@ document.getElementById("crowdsec-current-body").addEventListener("click", async
   } else if(action === "bw-unban"){
     await unbanBunkerwebIp(ip, btn);
   } else if(action === "whitelist"){
-    if(!confirm(`${ip} whitelisten und aktiven Ban sofort löschen?\n\n(Die Whitelist wird erst wirksam, nachdem du sie im Whitelist-Widget mit "Anwenden" bestätigst.)`)) return;
+    const sources = (btn.dataset.sources || "crowdsec").split(",");
+    const names = sources.map(x => x === "bunkerweb" ? "BunkerWeb" : "CrowdSec").join(" und ");
+    if(!confirm(`${ip} in die ${names}-Whitelist aufnehmen und aktive Bans sofort löschen?\n\n(Die Whitelist wird erst wirksam, nachdem du sie im jeweiligen Whitelist-Widget mit "Anwenden" bestätigst.)`)) return;
     btn.disabled = true;
     try{
-      const addRes = await fetch("/api/crowdsec/whitelist/entries", {
-        method: "POST", headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({ value: ip, country_code: btn.dataset.country || "", note: "Aus aktivem CrowdSec-Ban whitelistet" })
-      });
-      const addData = await addRes.json();
-      // 409 = IP steht schon in der Whitelist - kein Fehler, dann einfach nur den Ban loeschen.
-      if(!addRes.ok && addRes.status !== 409) throw new Error(addData.error || "Unbekannter Fehler beim Whitelisten");
-      await fetch(`/api/crowdsec/ban/${encodeURIComponent(ip)}`, { method: "DELETE" });
+      if(sources.includes("crowdsec")){
+        const addRes = await fetch("/api/crowdsec/whitelist/entries", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({ value: ip, country_code: btn.dataset.country || "", note: "Aus aktivem CrowdSec-Ban whitelistet" })
+        });
+        const addData = await addRes.json();
+        // 409 = IP steht schon in der Whitelist - kein Fehler, dann einfach nur den Ban loeschen.
+        if(!addRes.ok && addRes.status !== 409) throw new Error(addData.error || "Unbekannter Fehler beim Whitelisten");
+        await fetch(`/api/crowdsec/ban/${encodeURIComponent(ip)}`, { method: "DELETE" });
+      }
+      if(sources.includes("bunkerweb")){
+        // merge: steht die IP schon (fuer einzelne Domains) drin, wird sie auf alle erweitert.
+        const addRes = await fetch("/api/bunkerweb/whitelist/entries", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({ value: ip, all: true, merge: true, note: "Aus aktivem BunkerWeb-Ban whitelistet" })
+        });
+        const addData = await addRes.json();
+        if(!addRes.ok) throw new Error(addData.error || "Unbekannter Fehler beim BunkerWeb-Whitelisten");
+        await fetch(`/api/bunkerweb/ban/${encodeURIComponent(ip)}`, { method: "DELETE" });
+      }
       loadCrowdsecCurrent();
       if(csWhitelistOpen) loadCrowdsecWhitelist();
+      if(bwWlOpen) loadBwWhitelist();
     }catch(e){
       alert(`Whitelisten fehlgeschlagen: ${e.message}`);
       btn.disabled = false;
@@ -2183,6 +2267,200 @@ document.getElementById("crowdsec-whitelist-body").addEventListener("click", asy
     btn.disabled = false;
   }
 });
+
+// ---------------- BunkerWeb-Whitelist ----------------
+// Aenderungen landen als Entwurf im Dashboard; erst "Anwenden" schreibt sie in die
+// BunkerWeb-Konfiguration und laedt BunkerWeb neu (Job mit Rollback, ~3-4 Min.).
+let bwWlOpen = false;
+let bwWlData = { entries: [], domains: [] };
+let bwWlEditing = null;
+let bwWlJobTimer = null;
+const bwWlToggle = document.getElementById("bw-whitelist-toggle");
+const bwWlContent = document.getElementById("bw-whitelist-content");
+
+function setBwWlOpen(open){
+  bwWlOpen = open;
+  bwWlToggle.classList.toggle("open", open);
+  bwWlToggle.setAttribute("aria-expanded", open);
+  bwWlContent.classList.toggle("open", open);
+  if(open) loadBwWhitelist();
+}
+bwWlToggle.addEventListener("click", () => setBwWlOpen(!bwWlOpen));
+bwWlToggle.addEventListener("keydown", (ev) => {
+  if(ev.key === "Enter" || ev.key === " "){ ev.preventDefault(); setBwWlOpen(!bwWlOpen); }
+});
+
+function bwWlScopeHtml(e){
+  if(e.all) return `<span class="badge ok">Alle Domains</span>`;
+  const shown = e.domains.slice(0, 3).map(d => `<span class="clickable" data-filter-key="host" data-filter-value="${escapeHtml(d)}">${escapeHtml(d)}</span>`).join(", ");
+  const more = e.domains.length > 3 ? ` <span style="color:var(--muted)" title="${escapeHtml(e.domains.join("\n"))}">+${e.domains.length - 3} weitere</span>` : "";
+  return `<span style="font-size:12px">${shown}${more}</span>`;
+}
+
+async function loadBwWhitelist(){
+  const body = document.getElementById("bw-whitelist-body");
+  try{
+    const res = await fetch("/api/bunkerweb/whitelist");
+    const data = await res.json();
+    renderBwWhitelist(data);
+  }catch(e){
+    console.warn("BunkerWeb-Whitelist konnte nicht geladen werden", e);
+    body.innerHTML = `<tr><td colspan="5" style="color:var(--muted)">Fehler beim Laden</td></tr>`;
+  }
+}
+
+function renderBwWhitelist(data){
+  const body = document.getElementById("bw-whitelist-body");
+  const running = !!data.job_id;
+  document.getElementById("bwwl-add-btn").disabled = running;
+  if(!data.configured){
+    body.innerHTML = `<tr><td colspan="5" style="color:var(--muted)">BunkerWeb-Verwaltung nicht konfiguriert</td></tr>`;
+    return;
+  }
+  bwWlData = data;
+  body.innerHTML = data.entries.length ? data.entries.map(e => `<tr class="wl-row-${e.kind}">
+      <td><span class="badge ${e.kind === "ip" ? "info" : "warn"}">${e.kind === "ip" ? "IP" : "CIDR"}</span></td>
+      <td><span class="clickable" data-filter-key="ip" data-filter-value="${escapeHtml(e.value)}">${escapeHtml(e.value)}</span></td>
+      <td>${bwWlScopeHtml(e)}</td>
+      <td>${e.note ? `<span class="note-cell" title="${escapeHtml(e.note)}">${escapeHtml(e.note)}</span>` : `<span class="note-cell empty">–</span>`}</td>
+      <td>
+        <button type="button" class="action-btn" data-bwwl-edit="${escapeHtml(e.value)}" ${running ? "disabled" : ""}>Bearbeiten</button>
+        <button type="button" class="action-btn danger" data-bwwl-remove="${escapeHtml(e.value)}" ${running ? "disabled" : ""}>Entfernen</button>
+      </td>
+    </tr>`).join("") : `<tr><td colspan="5" style="color:var(--muted)">Keine Einträge</td></tr>`;
+  document.getElementById("bwwl-dirty-note").style.display = data.dirty && !running ? "inline" : "none";
+  document.getElementById("bwwl-apply-btn").style.display = data.dirty && !running ? "inline-block" : "none";
+  document.getElementById("bwwl-discard-btn").style.display = data.dirty && !running ? "inline-block" : "none";
+  if(running) watchBwWlJob(data.job_id);
+}
+
+function bwWlRenderDomainChecks(selected){
+  const box = document.getElementById("bwwl-f-domains");
+  box.innerHTML = bwWlData.domains.map(d => `<label title="${escapeHtml(d)}"><input type="checkbox" value="${escapeHtml(d)}" ${selected.includes(d) ? "checked" : ""}> ${escapeHtml(d)}</label>`).join("");
+}
+
+function bwWlSetScope(scope){
+  document.querySelectorAll('input[name="bwwl-scope"]').forEach(r => { r.checked = r.value === scope; });
+  document.getElementById("bwwl-f-domains").style.display = scope === "some" ? "grid" : "none";
+}
+document.querySelectorAll('input[name="bwwl-scope"]').forEach(r => r.addEventListener("change", () => bwWlSetScope(r.value)));
+
+function openBwWlForm(entry){
+  bwWlEditing = entry ? entry.value : null;
+  document.getElementById("bwwl-f-value").value = entry ? entry.value : "";
+  document.getElementById("bwwl-f-note").value = entry ? (entry.note || "") : "";
+  bwWlRenderDomainChecks(entry ? entry.domains : []);
+  bwWlSetScope(entry && !entry.all ? "some" : "all");
+  document.getElementById("bwwl-f-error").textContent = "";
+  document.getElementById("bwwl-f-save").textContent = entry ? "Speichern" : "Hinzufügen";
+  document.getElementById("bwwl-form").style.display = "block";
+  document.getElementById("bwwl-f-value").focus();
+}
+function closeBwWlForm(){
+  document.getElementById("bwwl-form").style.display = "none";
+  bwWlEditing = null;
+}
+document.getElementById("bwwl-add-btn").addEventListener("click", () => openBwWlForm(null));
+document.getElementById("bwwl-f-cancel").addEventListener("click", closeBwWlForm);
+
+document.getElementById("bwwl-f-save").addEventListener("click", async () => {
+  const errorEl = document.getElementById("bwwl-f-error");
+  const btn = document.getElementById("bwwl-f-save");
+  const value = document.getElementById("bwwl-f-value").value.trim();
+  const note = document.getElementById("bwwl-f-note").value.trim();
+  const all = document.querySelector('input[name="bwwl-scope"]:checked').value === "all";
+  const domains = [...document.querySelectorAll("#bwwl-f-domains input:checked")].map(c => c.value);
+  if(!value){ errorEl.textContent = "IP oder CIDR fehlt."; return; }
+  if(!all && !domains.length){ errorEl.textContent = "Mindestens eine Domain wählen."; return; }
+  const payload = { value, note, all, domains };
+  const isEdit = bwWlEditing !== null;
+  if(isEdit) payload.old_value = bwWlEditing;
+  btn.disabled = true;
+  errorEl.textContent = "";
+  try{
+    const res = await fetch("/api/bunkerweb/whitelist/entries", {
+      method: isEdit ? "PUT" : "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.error || "Unbekannter Fehler");
+    closeBwWlForm();
+    renderBwWhitelist(data);
+  }catch(e){
+    errorEl.textContent = e.message;
+  }finally{
+    btn.disabled = false;
+  }
+});
+document.getElementById("bwwl-f-value").addEventListener("keydown", (ev) => {
+  if(ev.key === "Enter"){ ev.preventDefault(); document.getElementById("bwwl-f-save").click(); }
+});
+
+document.getElementById("bw-whitelist-body").addEventListener("click", async (ev) => {
+  const filterEl = ev.target.closest("[data-filter-key]");
+  if(filterEl){ handleFilterClick(filterEl, ev); return; }
+  const editBtn = ev.target.closest("[data-bwwl-edit]");
+  if(editBtn){ openBwWlForm(bwWlData.entries.find(e => e.value === editBtn.dataset.bwwlEdit)); return; }
+  const btn = ev.target.closest("[data-bwwl-remove]");
+  if(!btn) return;
+  const value = btn.dataset.bwwlRemove;
+  if(!confirm(`"${value}" aus der BunkerWeb-Whitelist entfernen?\n\n(Wirksam erst nach "Anwenden".)`)) return;
+  btn.disabled = true;
+  try{
+    const res = await fetch(`/api/bunkerweb/whitelist/entries?value=${encodeURIComponent(value)}`, { method: "DELETE" });
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.error || "Unbekannter Fehler");
+    if(bwWlEditing === value) closeBwWlForm();
+    renderBwWhitelist(data);
+  }catch(e){
+    alert(`Entfernen fehlgeschlagen: ${e.message}`);
+    btn.disabled = false;
+  }
+});
+
+document.getElementById("bwwl-discard-btn").addEventListener("click", async () => {
+  if(!confirm("Alle nicht angewendeten Änderungen an der BunkerWeb-Whitelist verwerfen?")) return;
+  const res = await fetch("/api/bunkerweb/whitelist/discard", { method: "POST" });
+  renderBwWhitelist(await res.json());
+});
+
+document.getElementById("bwwl-apply-btn").addEventListener("click", async (ev) => {
+  const btn = ev.currentTarget;
+  if(!confirm("BunkerWeb-Whitelist jetzt anwenden?\n\nBunkerWeb lädt neu (ca. 3–4 Minuten). Die Sites bleiben dabei erreichbar; schlägt etwas fehl, wird der alte Stand wiederhergestellt.")) return;
+  btn.disabled = true;
+  try{
+    const res = await fetch("/api/bunkerweb/whitelist/apply", { method: "POST" });
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.error || "Unbekannter Fehler");
+    loadBwWhitelist();
+  }catch(e){
+    alert(`Anwenden fehlgeschlagen: ${e.message}`);
+  }finally{
+    btn.disabled = false;
+  }
+});
+
+function watchBwWlJob(jobId){
+  if(bwWlJobTimer) return;
+  const box = document.getElementById("bwwl-job");
+  box.style.display = "block";
+  const tick = async () => {
+    try{
+      const res = await fetch(`/api/domains/jobs/${jobId}`);
+      const job = await res.json();
+      const tail = (job.log || "").split("\n").slice(-6).join("\n");
+      box.textContent = (job.status === "running" ? "⏳ Wird angewendet …\n" : (job.status === "ok" ? "✓ " : "✗ ") + (job.summary || "") + "\n") + tail;
+      box.style.color = job.status === "error" ? "var(--accent-deny)" : "";
+      if(job.status !== "running"){
+        clearInterval(bwWlJobTimer);
+        bwWlJobTimer = null;
+        loadBwWhitelist();
+        if(job.status === "ok") setTimeout(() => { if(!bwWlJobTimer) box.style.display = "none"; }, 15000);
+      }
+    }catch(e){ /* naechster Versuch */ }
+  };
+  tick();
+  bwWlJobTimer = setInterval(tick, 3000);
+}
 
 document.getElementById("cs-whitelist-apply-btn").addEventListener("click", async (ev) => {
   const btn = ev.currentTarget;

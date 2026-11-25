@@ -2710,6 +2710,76 @@ def bunkerweb_api(method, path, payload=None):
     return data
 
 
+# Mit USE_REDIS=yes liegen BunkerWeb-Bans dauerhaft in Redis. Die API /bans
+# listet aber nur den nginx-Speicher der laufenden Instanz - nach einem Neustart
+# von bunkerweb fehlen dort alle Bans, bis die IP wieder auftaucht (durchgesetzt
+# werden sie trotzdem, BunkerWeb fragt bei jeder Anfrage auch Redis). Darum hier
+# zusaetzlich direkt aus Redis lesen.
+BUNKERWEB_REDIS_CONTAINER = os.environ.get("BUNKERWEB_REDIS_CONTAINER", "bw-redis").strip()
+_REDIS_BANS_LUA = (
+    "local out = {} "
+    "for _, k in ipairs(redis.call('KEYS', 'bans_*')) do "
+    "  if not string.find(k, '^bans_cs_') then "
+    "    out[#out + 1] = {k, redis.call('GET', k), redis.call('TTL', k)} "
+    "  end "
+    "end "
+    "return cjson.encode(out)"
+)
+
+
+def bunkerweb_redis_bans():
+    """Bans aus dem BunkerWeb-Redis im Format der API /bans. Leere Liste, wenn
+    kein Redis-Container laeuft (USE_REDIS=no)."""
+    if not BUNKERWEB_REDIS_CONTAINER:
+        return []
+    try:
+        container = docker_sdk.from_env().containers.get(BUNKERWEB_REDIS_CONTAINER)
+    except Exception:
+        return []
+    res = container.exec_run(["redis-cli", "--raw", "EVAL", _REDIS_BANS_LUA, "0"])
+    if res.exit_code != 0:
+        raise RuntimeError(f"BunkerWeb-Redis: {res.output.decode('utf-8', 'replace').strip()[:200]}")
+    bans = []
+    for key, value, ttl in json.loads(res.output.decode("utf-8", "replace") or "[]"):
+        if key.startswith("bans_ip_"):
+            ip, service = key[len("bans_ip_"):], None
+        else:
+            m = re.match(r"^bans_service_(.+)_ip_(.+)$", key)
+            if not m:
+                continue
+            service, ip = m.group(1), m.group(2)
+        try:
+            data = json.loads(value)
+        except (TypeError, ValueError):
+            data = {"reason": value}
+        if not isinstance(data, dict):
+            data = {"reason": str(data)}
+        permanent = bool(data.get("permanent")) or ttl == -1
+        bans.append({
+            "ip": ip, "kind": "ban",
+            "service": data.get("service") or service,
+            "ban_scope": data.get("ban_scope") or ("service" if service else "global"),
+            "reason": data.get("reason"), "reason_data": data.get("reason_data") or {},
+            "country": data.get("country"), "date": data.get("date"),
+            "permanent": permanent, "exp": None if permanent else ttl,
+        })
+    return bans
+
+
+def bunkerweb_all_bans():
+    """API-Bans (laufende Instanz) plus die nur noch in Redis liegenden."""
+    api = bunkerweb_api("GET", "/bans").get("data") or []
+    try:
+        stored = bunkerweb_redis_bans()
+    except Exception as exc:
+        log.warning("BunkerWeb-Bans aus Redis nicht lesbar: %s", exc)
+        stored = []
+    key = lambda b: (b.get("ip"), b.get("ban_scope") or "global",
+                     b.get("service") if (b.get("ban_scope") == "service") else None)
+    seen = {key(b) for b in api}
+    return api + [b for b in stored if key(b) not in seen]
+
+
 def _csv_arg(args, key):
     return {v.strip() for v in (args.get(key) or "").split(",") if v.strip()}
 
@@ -2724,7 +2794,7 @@ def api_bunkerweb_bans():
     if not blocker_allows(request.args, "bunkerweb"):
         return jsonify(configured=True, bans=[], hidden_by_filter=True)
     try:
-        raw = bunkerweb_api("GET", "/bans").get("data") or []
+        raw = bunkerweb_all_bans()
     except Exception as exc:  # Container weg, API down, ...
         log.warning("BunkerWeb-Bans konnten nicht gelesen werden: %s", exc)
         return jsonify(configured=True, error=str(exc), bans=[]), 502
@@ -2793,7 +2863,7 @@ def api_bunkerweb_delete_ban(ip):
     except ValueError:
         return jsonify(error="ungueltige IP-Adresse"), 400
     try:
-        current = [b for b in (bunkerweb_api("GET", "/bans").get("data") or []) if b.get("ip") == ip]
+        current = [b for b in bunkerweb_all_bans() if b.get("ip") == ip]
         targets = [{"ban_scope": b.get("ban_scope") or "global", "service": b.get("service")} for b in current] \
             or [{"ban_scope": "global", "service": None}]
         done = []

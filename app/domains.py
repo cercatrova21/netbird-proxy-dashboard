@@ -328,6 +328,112 @@ def write_bw_sites(state):
     return backup
 
 
+
+# --------------------------------------------------------------------------- #
+# BunkerWeb-Whitelist (WHITELIST_IP): global in docker-compose.yml + pro Site
+# --------------------------------------------------------------------------- #
+# BunkerWeb nimmt pro Site deren eigenes WHITELIST_IP, sonst den globalen Wert aus
+# docker-compose.yml (bw-scheduler). "Alle Domains" heisst darum: global UND in
+# jeder Site mit eigener Liste - so greift ein Eintrag auch fuer neue Domains.
+
+_GLOBAL_WL_RX = re.compile(r'^([ \t]+)WHITELIST_IP:[ \t]*"([^"\n]*)"[ \t]*$', re.M)
+_GLOBAL_WL_ANCHOR_RX = re.compile(r'^([ \t]+)MULTISITE:[ \t]*"?yes"?[ \t]*$', re.M)
+WL_SITE_COMMENT = "Verwaltet ueber die BunkerWeb-Whitelist im Proxy-Dashboard"
+
+
+def bw_main_compose_path():
+    return os.path.join(BW_COMPOSE_DIR, "docker-compose.yml") if BW_COMPOSE_DIR else ""
+
+
+def read_global_whitelist():
+    path = bw_main_compose_path()
+    if not path or not os.path.exists(path):
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        m = _GLOBAL_WL_RX.search(f.read())
+    return m.group(2).split() if m else []
+
+
+def write_global_whitelist(values):
+    path = bw_main_compose_path()
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    new = " ".join(values)
+    m = _GLOBAL_WL_RX.search(text)
+    if m:
+        if len(_GLOBAL_WL_RX.findall(text)) != 1:
+            raise DomainError("docker-compose.yml enthaelt mehrere WHITELIST_IP - bitte manuell pruefen")
+        if m.group(2) == new:
+            return None
+        text = text[:m.start(2)] + new + text[m.end(2):]
+    else:
+        if not values:
+            return None
+        a = _GLOBAL_WL_ANCHOR_RX.search(text)
+        if not a:
+            raise DomainError("bw-scheduler-Umgebung in docker-compose.yml nicht gefunden (MULTISITE)")
+        ind = a.group(1)
+        ins = (f"\n{ind}# Globale Whitelist (Sites ohne eigenes WHITELIST_IP), verwaltet vom Proxy-Dashboard"
+               f'\n{ind}WHITELIST_IP: "{new}"')
+        text = text[:a.end()] + ins + text[a.end():]
+    yaml.safe_load(text)  # Syntax pruefen, bevor die Datei angefasst wird
+    backup = _backup_file(path, "compose")
+    _write_in_place(path, text)
+    return backup
+
+
+def _wl_canon(value):
+    """IP/CIDR pruefen und normalisieren (z.B. 10.1.2.3/8 -> 10.0.0.0/8)."""
+    value = (value or "").strip()
+    if not value:
+        raise DomainError("Kein Wert angegeben")
+    try:
+        if "/" in value:
+            return str(ipaddress.ip_network(value, strict=False))
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        raise DomainError(f"'{value}' ist keine gueltige IP-Adresse oder CIDR-Range")
+
+
+def bw_whitelist_live(sites=None):
+    """Aktueller Stand aus den Dateien -> (entries, domains). entry = {value, all, domains[]}."""
+    sites = sites or read_bw_sites()
+    domains = [d for d in sites["server_names"] if d in sites["sites"]]
+    glob_vals = read_global_whitelist()
+    eff = {}
+    for d in domains:
+        own = next((x for x in sites["sites"][d]["settings"] if x["key"] == "WHITELIST_IP"), None)
+        eff[d] = own["value"].split() if own is not None else list(glob_vals)
+    order = []
+    for v in glob_vals + [v for d in domains for v in eff[d]]:
+        if v not in order:
+            order.append(v)
+    entries = []
+    for v in order:
+        ds = [d for d in domains if v in eff[d]]
+        is_all = v in glob_vals and len(ds) == len(domains)
+        entries.append({"value": v, "all": is_all, "domains": [] if is_all else ds})
+    return entries, domains
+
+
+def bw_whitelist_render(entries, sites):
+    """Entries in Sites-Zustand + globale Liste umsetzen. Gibt (sites, global_values) zurueck."""
+    sites = copy.deepcopy(sites)
+    glob_new = [e["value"] for e in entries if e["all"]]
+    for d in sites["server_names"]:
+        site = sites["sites"].get(d)
+        if site is None:
+            continue
+        want = [e["value"] for e in entries if e["all"] or d in e["domains"]]
+        own = next((x for x in site["settings"] if x["key"] == "WHITELIST_IP"), None)
+        if own is not None:
+            # Bestehende Reihenfolge behalten (keine Schein-Aenderungen), Neues hinten anfuegen
+            keep = [v for v in own["value"].split() if v in want]
+            own["value"] = " ".join(keep + [v for v in want if v not in keep])
+        elif want != glob_new:
+            site["settings"].append({"key": "WHITELIST_IP", "value": " ".join(want), "comment": WL_SITE_COMMENT})
+    return sites, glob_new
+
 COUNTRY_KEYS = ("WHITELIST_COUNTRY", "BLACKLIST_COUNTRY")
 
 
@@ -1864,6 +1970,234 @@ def register(app, get_conn, nb_base, nb_token, docker_client, backup_sync_lookup
         except Exception:
             job_lock.release()
             raise
+
+
+    # ---------------- BunkerWeb-Whitelist (Dashboard-Widget) ----------------
+    # Aenderungen landen zuerst in einem Entwurf (DB), erst "Anwenden" schreibt die
+    # Dateien und laedt BunkerWeb neu (ein Job wie auf der Domains-Seite, mit
+    # Rollback). So wendet kein anderer Domain-Job halbfertige Aenderungen an.
+
+    c0 = get_conn()
+    c0.execute("CREATE TABLE IF NOT EXISTS bw_whitelist_draft (id INTEGER PRIMARY KEY CHECK (id = 1), "
+               "entries TEXT NOT NULL, updated_at TEXT NOT NULL)")
+    c0.execute("CREATE TABLE IF NOT EXISTS bw_whitelist_meta (value TEXT PRIMARY KEY, note TEXT, updated_at TEXT)")
+    c0.commit()
+    c0.close()
+    wl_lock = threading.Lock()
+
+    def _wl_draft():
+        c = get_conn()
+        r = c.execute("SELECT entries FROM bw_whitelist_draft WHERE id = 1").fetchone()
+        c.close()
+        return json.loads(r["entries"]) if r else None
+
+    def _wl_save_draft(entries):
+        c = get_conn()
+        c.execute("INSERT INTO bw_whitelist_draft (id, entries, updated_at) VALUES (1, ?, ?) "
+                  "ON CONFLICT(id) DO UPDATE SET entries = excluded.entries, updated_at = excluded.updated_at",
+                  (json.dumps(entries), _now_iso()))
+        c.commit()
+        c.close()
+
+    def _wl_clear_draft():
+        c = get_conn()
+        c.execute("DELETE FROM bw_whitelist_draft")
+        c.commit()
+        c.close()
+
+    def _wl_meta():
+        c = get_conn()
+        rows = c.execute("SELECT value, note FROM bw_whitelist_meta").fetchall()
+        c.close()
+        return {r["value"]: r["note"] or "" for r in rows}
+
+    def _wl_set_note(value, note, old_value=None):
+        c = get_conn()
+        if old_value and old_value != value:
+            c.execute("DELETE FROM bw_whitelist_meta WHERE value = ?", (old_value,))
+        c.execute("INSERT INTO bw_whitelist_meta (value, note, updated_at) VALUES (?, ?, ?) "
+                  "ON CONFLICT(value) DO UPDATE SET note = excluded.note, updated_at = excluded.updated_at",
+                  (value, note, _now_iso()))
+        c.commit()
+        c.close()
+
+    def _wl_norm(entries):
+        return sorted((e["value"], bool(e["all"]), tuple(sorted(e["domains"]))) for e in entries)
+
+    def _wl_running_job():
+        c = get_conn()
+        r = c.execute("SELECT id FROM domain_jobs WHERE action = 'whitelist' AND status = 'running' "
+                      "ORDER BY id DESC LIMIT 1").fetchone()
+        c.close()
+        return r["id"] if r else None
+
+    def _wl_response(entries=None, domains=None):
+        live, live_domains = bw_whitelist_live()
+        draft = _wl_draft()
+        cur = draft if draft is not None else live
+        dirty = draft is not None and _wl_norm(draft) != _wl_norm(live)
+        meta = _wl_meta()
+        out = []
+        for e in cur:
+            ds = [d for d in e["domains"] if d in live_domains]
+            out.append({"value": e["value"], "kind": "cidr" if "/" in e["value"] else "ip",
+                        "all": bool(e["all"]), "domains": ds, "note": meta.get(e["value"], "")})
+        return jsonify(configured=True, entries=out, domains=live_domains, dirty=dirty,
+                       job_id=_wl_running_job())
+
+    def _wl_entry_from_body(body, domains):
+        value = _wl_canon(body.get("value"))
+        is_all = bool(body.get("all"))
+        ds = [] if is_all else [d for d in (body.get("domains") or []) if d in domains]
+        if not is_all and not ds:
+            raise DomainError("Bitte 'Alle Domains' oder mindestens eine Domain waehlen")
+        return {"value": value, "all": is_all, "domains": ds}
+
+    def _wl_guard():
+        if not BW_COMPOSE_DIR or not BW_SITES_FILE:
+            return jsonify(configured=False, error="BunkerWeb-Verwaltung nicht konfiguriert", entries=[], domains=[]), 200
+        return None
+
+    @bp.route("/api/bunkerweb/whitelist")
+    def api_bw_whitelist_get():
+        return _wl_guard() or _wl_response()
+
+    @bp.route("/api/bunkerweb/whitelist/entries", methods=["POST", "PUT"])
+    def api_bw_whitelist_upsert():
+        g = _wl_guard()
+        if g:
+            return g
+        body = request.get_json(silent=True) or {}
+        with wl_lock:
+            live, domains = bw_whitelist_live()
+            entries = _wl_draft()
+            entries = entries if entries is not None else live
+            try:
+                e = _wl_entry_from_body(body, domains)
+                old = _wl_canon(body["old_value"]) if request.method == "PUT" else None
+            except DomainError as ex:
+                return jsonify(error=str(ex)), 400
+            existing = {x["value"]: i for i, x in enumerate(entries)}
+            if request.method == "POST":
+                if e["value"] in existing:
+                    if not body.get("merge"):
+                        return jsonify(error=f"'{e['value']}' ist bereits in der Whitelist"), 409
+                    cur = entries[existing[e["value"]]]
+                    cur["all"] = cur["all"] or e["all"]
+                    cur["domains"] = [] if cur["all"] else sorted(set(cur["domains"]) | set(e["domains"]))
+                else:
+                    entries.append(e)
+            else:
+                if old not in existing:
+                    return jsonify(error=f"'{old}' nicht in der Whitelist gefunden"), 404
+                if e["value"] != old and e["value"] in existing:
+                    return jsonify(error=f"'{e['value']}' ist bereits in der Whitelist"), 409
+                entries[existing[old]] = e
+            _wl_save_draft(entries)
+            merged_existing = request.method == "POST" and e["value"] in existing
+            if "note" in body and not merged_existing:
+                _wl_set_note(e["value"], (body.get("note") or "").strip(), old)
+        return _wl_response()
+
+    @bp.route("/api/bunkerweb/whitelist/entries", methods=["DELETE"])
+    def api_bw_whitelist_delete():
+        g = _wl_guard()
+        if g:
+            return g
+        try:
+            value = _wl_canon(request.args.get("value"))
+        except DomainError as ex:
+            return jsonify(error=str(ex)), 400
+        with wl_lock:
+            live, _ = bw_whitelist_live()
+            entries = _wl_draft()
+            entries = entries if entries is not None else live
+            entries = [e for e in entries if e["value"] != value]
+            _wl_save_draft(entries)
+        return _wl_response()
+
+    @bp.route("/api/bunkerweb/whitelist/discard", methods=["POST"])
+    def api_bw_whitelist_discard():
+        _wl_clear_draft()
+        return _wl_guard() or _wl_response()
+
+    def run_wl_job(job_id, entries):
+        lines = []
+
+        def joblog(msg):
+            lines.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+            log.info("whitelist-job %s: %s", job_id, msg)
+            _job_update(job_id, log="\n".join(lines))
+
+        status, summary = "ok", ""
+        sites_before = glob_before = None
+        try:
+            sites_before = read_bw_sites()
+            glob_before = read_global_whitelist()
+            sites_new, glob_new = bw_whitelist_render(entries, sites_before)
+            joblog("Schritt 1/2 [BunkerWeb] Whitelist schreiben und bw-scheduler neu laden")
+            for e in entries:
+                joblog(f"  {e['value']}: " + ("alle Domains" if e["all"] else ", ".join(e["domains"])))
+            b1 = write_global_whitelist(glob_new)
+            joblog(f"  docker-compose.yml (global): {' '.join(glob_new) or '(leer)'}"
+                   + (f" - Backup {os.path.basename(b1)}" if b1 else " - unveraendert"))
+            b2 = write_bw_sites(sites_new)
+            joblog(f"  Sites-Datei geschrieben (Backup: {os.path.basename(b2) if b2 else '-'})")
+            st = bw_apply_start(docker_client, joblog)
+            if st["warned"]:
+                raise DomainError("BunkerWeb hat Settings verworfen (siehe Warnungen)")
+            joblog("Schritt 2/2 [Pruefung] Reload abschliessen")
+            res = bw_apply_finish(docker_client, joblog, st)
+            if res["warnings"]:
+                raise DomainError("BunkerWeb hat Settings verworfen (siehe Warnungen)")
+            live, _ = bw_whitelist_live()
+            if _wl_norm(live) != _wl_norm(entries):
+                raise DomainError("Geschriebener Stand weicht vom Entwurf ab")
+            _wl_clear_draft()
+            summary = f"Whitelist angewendet ({len(entries)} Eintraege)"
+        except Exception as e:
+            log.exception("whitelist-job %s", job_id)
+            joblog(f"FEHLER: {e}")
+            status, summary = "error", f"Abgebrochen: {e}"
+            if sites_before is not None:
+                try:
+                    joblog("Alten Stand wiederherstellen ...")
+                    write_global_whitelist(glob_before or [])
+                    write_bw_sites(sites_before)
+                    bw_apply(docker_client, joblog)
+                    joblog("  Alter Stand ist wieder aktiv (Entwurf bleibt erhalten)")
+                except Exception as re_:
+                    joblog(f"Rollback-FEHLER: {re_} - bitte manuell pruefen!")
+        finally:
+            joblog(f"Fertig: {summary}")
+            _job_update(job_id, status=status, summary=summary, finished_at=_now_iso(), log="\n".join(lines))
+            job_lock.release()
+
+    @bp.route("/api/bunkerweb/whitelist/apply", methods=["POST"])
+    def api_bw_whitelist_apply():
+        g = _wl_guard()
+        if g:
+            return g
+        entries = _wl_draft()
+        if entries is None:
+            return jsonify(error="Keine offenen Aenderungen"), 400
+        if not job_lock.acquire(blocking=False):
+            return jsonify(error="Es laeuft bereits eine BunkerWeb-Aenderung - bitte warten"), 409
+        try:
+            pub = {"domain": "BunkerWeb-Whitelist", "action": "whitelist",
+                   "steps": [{"kind": "bw_whitelist", "system": "BunkerWeb", "text": "Whitelist schreiben, bw-scheduler neu laden"}]}
+            c = get_conn()
+            cur = c.execute(
+                "INSERT INTO domain_jobs (domain, action, created_at, status, plan, log) VALUES (?,?,?,?,?,?)",
+                ("BunkerWeb-Whitelist", "whitelist", _now_iso(), "running", json.dumps(pub), ""))
+            job_id = cur.lastrowid
+            c.commit()
+            c.close()
+            threading.Thread(target=run_wl_job, args=(job_id, entries), daemon=True).start()
+        except Exception:
+            job_lock.release()
+            raise
+        return jsonify(job_id=job_id)
 
     # ---------------- Routen ----------------
 
