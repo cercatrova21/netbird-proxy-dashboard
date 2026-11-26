@@ -1364,11 +1364,14 @@ function renderCrowdsecFpWarning(entries){
   if(!entries || !entries.length){ el.innerHTML = ""; return; }
   el.innerHTML = entries.map(e => {
     const isp = e.as_name ? `, ${escapeHtml(e.as_name)}` : "";
+    const isBw = e.source === "bunkerweb";
+    const why = isBw && e.reasons && e.reasons.length
+      ? ` – Grund: ${escapeHtml(e.reasons.join(", "))}, gilt für ${escapeHtml((e.services || []).join(", "))}` : "";
     return `<div class="fp-warning-item">
       <span class="tag">ISP</span>
-      <span>Aktiver CrowdSec-Block für <b>${escapeHtml(e.source_ip)}</b> (${countryLabel(e.country_code)}${isp}) - moeglicherweise ein Fehlalarm bei einem bekannten CH/DE-Consumer-ISP</span>
+      <span>Aktive${isBw ? " BunkerWeb-Sperre" : "r CrowdSec-Block"} für <b>${escapeHtml(e.source_ip)}</b> (${countryLabel(e.country_code)}${isp})${why} - moeglicherweise ein Fehlalarm bei einem bekannten CH/DE-Consumer-ISP</span>
       <button type="button" data-filter-key="ip" data-filter-value="${escapeHtml(e.source_ip)}">Filtern</button>
-      <button type="button" data-action="unban" data-ip="${escapeHtml(e.source_ip)}">Ban löschen</button>
+      <button type="button" data-action="${isBw ? "bw-unban" : "unban"}" data-ip="${escapeHtml(e.source_ip)}">Ban löschen</button>
     </div>`;
   }).join("");
 }
@@ -1396,6 +1399,8 @@ document.getElementById("crowdsec-fp-warning").addEventListener("click", (ev) =>
   if(filterEl){ handleFilterClick(filterEl, ev); return; }
   const unbanBtn = ev.target.closest("[data-action='unban']");
   if(unbanBtn) unbanIp(unbanBtn.dataset.ip, unbanBtn);
+  const bwUnbanBtn = ev.target.closest("[data-action='bw-unban']");
+  if(bwUnbanBtn) unbanBunkerwebIp(bwUnbanBtn.dataset.ip, bwUnbanBtn).then(() => loadStats());
 });
 
 const REQUEST_SCALE_LOW = [0x1b, 0x25, 0x32];   // #1b2532, wenig Requests

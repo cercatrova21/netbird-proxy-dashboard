@@ -284,6 +284,11 @@ def init_db():
     # Markiert, ob fuer diesen Alert schon eine Fehlalarm-Benachrichtigung raus ist
     # (siehe check_crowdsec_fp_notifications) - eigenes ALTER statt in
     # migrate_schema(), weil crowdsec_alerts erst hier oben angelegt wird.
+    # Bereits benachrichtigte BunkerWeb-Bans (Fehlalarm-Kriterien), pro IP + Ban-Beginn:
+    # ein neuer Ban derselben IP benachrichtigt wieder, ein laufender nicht.
+    conn.execute("""CREATE TABLE IF NOT EXISTS bunkerweb_fp_notified (
+        source_ip TEXT NOT NULL, ban_date INTEGER NOT NULL, notified_at TEXT NOT NULL,
+        PRIMARY KEY (source_ip, ban_date))""")
     if "fp_notified" not in {row["name"] for row in conn.execute("PRAGMA table_info(crowdsec_alerts)")}:
         conn.execute("ALTER TABLE crowdsec_alerts ADD COLUMN fp_notified INTEGER NOT NULL DEFAULT 0")
     # Notiz + Herkunftsland je Whitelist-Eintrag - bewusst eine eigene Tabelle statt
@@ -1138,6 +1143,112 @@ def check_crowdsec_fp_notifications():
     conn.close()
 
 
+_bw_fp_cache = {"at": 0.0, "key": None, "data": []}
+
+
+def find_bunkerweb_fp_bans(criteria, max_age=20):
+    """Aktive BunkerWeb-Bans, die auf dieselben Fehlalarm-Kriterien wie bei CrowdSec
+    passen (Land UND ISP-Stichwort im AS-Namen), pro IP zusammengefasst. Kurz
+    gecacht, weil Banner (_compute_stats) und Poller beide fragen."""
+    countries = {c.upper() for c in criteria["countries"]}
+    keywords = [k.lower() for k in criteria["isp_keywords"] if k]
+    if not BUNKERWEB_CONTAINER_NAME or not countries or not keywords:
+        return []
+    key = (tuple(sorted(countries)), tuple(keywords))
+    if _bw_fp_cache["key"] == key and time.time() - _bw_fp_cache["at"] < max_age:
+        return _bw_fp_cache["data"]
+    now = time.time()
+    by_ip = {}
+    for b in bunkerweb_all_bans():
+        ip = b.get("ip")
+        if not ip or b.get("kind", "ban") != "ban":
+            continue
+        country = (b.get("country") or "").upper()
+        if country not in countries:
+            continue
+        as_number, as_name = lookup_asn(ip)
+        if not as_name or not any(k in as_name.lower() for k in keywords):
+            continue
+        permanent = bool(b.get("permanent")) or b.get("exp") in (None, -1)
+        expires = None if permanent else now + float(b.get("exp") or 0)
+        e = by_ip.setdefault(ip, {"source_ip": ip, "country_code": country, "as_name": as_name,
+                                  "reasons": [], "services": [], "ban_dates": [], "expires_ts": 0.0,
+                                  "permanent": False})
+        if b.get("reason") and b["reason"] not in e["reasons"]:
+            e["reasons"].append(b["reason"])
+        scope = b.get("ban_scope") or "global"
+        label = b.get("service") if scope == "service" and b.get("service") else "alle Domains"
+        if label not in e["services"]:
+            e["services"].append(label)
+        e["ban_dates"].append(int(b.get("date") or 0))
+        if permanent:
+            e["permanent"] = True
+        else:
+            e["expires_ts"] = max(e["expires_ts"], expires)
+    out = []
+    for e in by_ip.values():
+        ts = e.pop("expires_ts")
+        e["expires_at"] = None if e["permanent"] else datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        out.append(e)
+    _bw_fp_cache.update(at=time.time(), key=key, data=out)
+    return out
+
+
+def send_bunkerweb_fp_notification(e):
+    """ntfy-Push fuer einen BunkerWeb-Ban mit Fehlalarm-Muster (wie bei CrowdSec)."""
+    until = "permanent" if e["permanent"] else (e["expires_at"] or "?").replace("T", " ").replace("Z", " UTC")
+    message = (
+        f"{e['source_ip']} ({e['country_code'] or '??'}, {e['as_name'] or 'unbekannter ISP'}) ist "
+        f"aktuell durch BunkerWeb gesperrt.\n"
+        f"Grund: {', '.join(e['reasons']) or 'unbekannt'}\n"
+        f"Gilt fuer: {', '.join(e['services'])} (bis {until})\n\n"
+        f"Kriterien passen auf einen bekannten Consumer-ISP - moeglicherweise ein Fehlalarm."
+    )
+    try:
+        resp = requests.post(
+            CROWDSEC_FP_NOTIFY_URL,
+            data=message.encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {CROWDSEC_FP_NOTIFY_TOKEN}",
+                "Title": f"Moeglicher BunkerWeb-Fehlalarm: {e['source_ip']}",
+                "Priority": "high",
+                "Tags": "warning",
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return True
+    except Exception:
+        log.exception("BunkerWeb-FP-Benachrichtigung fuer %s konnte nicht gesendet werden", e["source_ip"])
+        return False
+
+
+def check_bunkerweb_fp_notifications():
+    """Wie check_crowdsec_fp_notifications(), fuer BunkerWeb-Bans. Einmal pro IP
+    und Ban-Beginn; ein neuer Ban derselben IP benachrichtigt erneut."""
+    if not (BUNKERWEB_CONTAINER_NAME and CROWDSEC_FP_NOTIFY_URL and CROWDSEC_FP_NOTIFY_TOKEN):
+        return
+    matches = find_bunkerweb_fp_bans(get_crowdsec_fp_criteria())
+    if not matches:
+        return
+    conn = get_conn()
+    try:
+        for e in matches:
+            new_dates = [d for d in e["ban_dates"] if not conn.execute(
+                "SELECT 1 FROM bunkerweb_fp_notified WHERE source_ip = ? AND ban_date = ?",
+                (e["source_ip"], d)).fetchone()]
+            if not new_dates:
+                continue
+            if send_bunkerweb_fp_notification(e):
+                with _db_lock:
+                    conn.executemany(
+                        "INSERT OR IGNORE INTO bunkerweb_fp_notified (source_ip, ban_date, notified_at) VALUES (?,?,?)",
+                        [(e["source_ip"], d, datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")) for d in new_dates])
+                    conn.commit()
+    finally:
+        conn.close()
+
+
 def get_whitelist_meta_map():
     conn = get_conn()
     rows = conn.execute("SELECT value, note, country_code FROM crowdsec_whitelist_meta").fetchall()
@@ -1308,6 +1419,10 @@ def poller_loop():
             check_crowdsec_fp_notifications()
         except Exception:
             log.exception("Unerwarteter Fehler bei der CrowdSec-Fehlalarm-Benachrichtigung")
+        try:
+            check_bunkerweb_fp_notifications()
+        except Exception:
+            log.exception("Unerwarteter Fehler bei der BunkerWeb-Fehlalarm-Benachrichtigung")
         try:
             prune_old_events()
         except Exception:
@@ -2452,6 +2567,16 @@ def _compute_stats(args):
                 entry["scenarios"].append(r["scenario"])
             entry["expires_at"] = max(entry["expires_at"], r["expires_at"])
         crowdsec_likely_fp = sorted(by_ip.values(), key=lambda e: e["expires_at"], reverse=True)
+    for e in crowdsec_likely_fp:
+        e["source"] = "crowdsec"
+    try:
+        for e in find_bunkerweb_fp_bans(get_crowdsec_fp_criteria()):
+            crowdsec_likely_fp.append({"source": "bunkerweb", "source_ip": e["source_ip"],
+                                       "country_code": e["country_code"], "as_name": e["as_name"],
+                                       "reasons": e["reasons"], "services": e["services"],
+                                       "expires_at": e["expires_at"]})
+    except Exception as exc:
+        log.warning("BunkerWeb-Fehlalarm-Pruefung fehlgeschlagen: %s", exc)
 
     conn.close()
 

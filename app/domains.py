@@ -597,7 +597,11 @@ def _bw_scan_logs(docker_client, st, joblog):
             joblog("  WARNUNG: " + line[-300:])
     # Nur Fehler beim Erzeugen/Laden der Konfiguration sind fatal (nicht z.B. ein
     # fehlgeschlagener Blacklist-Download eines Jobs).
-    bad = [ln for ln in logs.splitlines() if "❌" in ln and any(
+    # Vorlaeufige Meldungen, nach denen der Scheduler es selbst erneut versucht
+    # (z.B. "... deferring them for 30s (1/3)"), sind kein Fehler - erst wenn der
+    # Reload nie fertig wird, greift der Timeout in bw_apply_start.
+    retry_rx = re.compile(r"deferr|retrying|\((?:1|2)/3\)", re.I)
+    bad = [ln for ln in logs.splitlines() if "❌" in ln and not retry_rx.search(ln) and any(
         x in ln for x in ("SAVE_CONFIG", "GENERATOR", "eload", "onfig"))]
     if bad:
         for ln in bad[-5:]:
@@ -1497,6 +1501,35 @@ def register(app, get_conn, nb_base, nb_token, docker_client, backup_sync_lookup
         c.commit()
         c.close()
 
+    bg_reload = {"active": False}
+
+    def _busy_error():
+        if bg_reload["active"]:
+            return ("BunkerWeb schliesst gerade noch den Reload der letzten Aenderung ab "
+                    "(ca. 2 Min.) - bitte kurz warten und dann erneut anwenden")
+        return "Es laeuft bereits eine Aenderung - bitte warten"
+
+    def _finish_second_reload(job_id, st, lines, summary):
+        """BunkerWeb laedt nach dem Neustart des Schedulers ein zweites Mal mit derselben
+        Konfiguration neu (~2 Min.). Die Aenderung ist da schon aktiv und getestet -
+        der Job gilt darum bereits als fertig; hier wird nur noch im Hintergrund auf
+        den Abschluss gewartet, bevor der naechste BunkerWeb-Job starten darf."""
+        def jl(msg):
+            lines.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+            _job_update(job_id, log="\n".join(lines))
+        bg_reload["active"] = True
+        try:
+            jl("Hintergrund: BunkerWeb laedt noch ein zweites Mal neu (gleiche Konfiguration) - "
+               "weitere BunkerWeb-Aenderungen sind bis dahin gesperrt.")
+            res = bw_apply_finish(docker_client, jl, st)
+            if res["warnings"]:
+                _job_update(job_id, status="warn", summary=summary + "; BunkerWeb hat Settings verworfen (siehe Warnungen)")
+        except Exception as e:
+            jl(f"Hintergrund: zweiter BunkerWeb-Reload nicht bestaetigt: {e}")
+            _job_update(job_id, status="warn", summary=summary + "; zweiter BunkerWeb-Reload nicht bestaetigt")
+        finally:
+            bg_reload["active"] = False
+
     def run_job(job_id, plan):
         lines = []
         last_flush = [0.0]
@@ -1511,6 +1544,7 @@ def register(app, get_conn, nb_base, nb_token, docker_client, backup_sync_lookup
 
         domain = plan["domain"]
         bw_state = None
+        deferred_bw = None
         undo = []  # (Beschreibung, fn)
         status, summary = "ok", "Erfolgreich"
         try:
@@ -1604,9 +1638,9 @@ def register(app, get_conn, nb_base, nb_token, docker_client, backup_sync_lookup
                     if bad_now:
                         status, summary = "warn", f"Ausgefuehrt, Testaufruf aber nicht OK ({_fmt_http(res)})"
             if bw_state is not None:
-                res = bw_apply_finish(docker_client, joblog, bw_state)
-                if res["warnings"]:
+                if bw_state["warned"]:
                     raise DomainError("BunkerWeb hat Settings verworfen (siehe Warnungen)")
+                deferred_bw = bw_state
             _cert_cache.pop(domain, None)
         except Exception as e:
             log.exception("domain-job %s fehlgeschlagen", job_id)
@@ -1634,7 +1668,11 @@ def register(app, get_conn, nb_base, nb_token, docker_client, backup_sync_lookup
                 except Exception:
                     pass
             lookups_cache["at"] = 0
-            job_lock.release()
+            try:
+                if deferred_bw is not None and status in ("ok", "warn"):
+                    _finish_second_reload(job_id, deferred_bw, lines, summary)
+            finally:
+                job_lock.release()
 
     def _fmt_http(res):
         if res is None:
@@ -1728,6 +1766,7 @@ def register(app, get_conn, nb_base, nb_token, docker_client, backup_sync_lookup
         status, summary = "ok", ""
         sites_before = None
         bw_state = None
+        deferred_bw = None
         warn_domains = []
 
         def step(kind):
@@ -1869,14 +1908,18 @@ def register(app, get_conn, nb_base, nb_token, docker_client, backup_sync_lookup
                 elif not r.get("ok"):
                     warn_domains.append(d)
 
-            # 6) Zweiten BunkerWeb-Reload abschliessen
+            # 6) Zweiten BunkerWeb-Reload abschliessen - sofort nur, wenn gleich noch
+            #    zurueckgerollt werden muss, sonst im Hintergrund nach Jobende
+            bw_failed = [d for d in failed if kinds[d] & {"bw_write", "bw_write_noreload"}]
             if bw_state is not None:
-                res = bw_apply_finish(docker_client, joblog, bw_state)
-                if res["warnings"]:
-                    raise DomainError("BunkerWeb hat Settings verworfen (siehe Warnungen)")
+                if bw_failed and sites_before is not None:
+                    res = bw_apply_finish(docker_client, joblog, bw_state)
+                    if res["warnings"]:
+                        raise DomainError("BunkerWeb hat Settings verworfen (siehe Warnungen)")
+                else:
+                    deferred_bw = bw_state
 
             # 7) Sites der zurueckgerollten Domains zuruecksetzen (zweiter Reload nur bei Fehlern)
-            bw_failed = [d for d in failed if kinds[d] & {"bw_write", "bw_write_noreload"}]
             if bw_failed and sites_before is not None:
                 joblog(f"BunkerWeb-Sites von {', '.join(bw_failed)} zuruecksetzen ...")
                 sites = read_bw_sites()
@@ -1931,7 +1974,11 @@ def register(app, get_conn, nb_base, nb_token, docker_client, backup_sync_lookup
             joblog(f"Fertig: {summary}")
             _job_update(job_id, status=status, summary=summary, finished_at=_now_iso(), log="\n".join(lines))
             lookups_cache["at"] = 0
-            job_lock.release()
+            try:
+                if deferred_bw is not None and status in ("ok", "warn"):
+                    _finish_second_reload(job_id, deferred_bw, lines, summary)
+            finally:
+                job_lock.release()
 
     # ---------------- Sammlung offener Aenderungen ----------------
 
@@ -2131,6 +2178,7 @@ def register(app, get_conn, nb_base, nb_token, docker_client, backup_sync_lookup
 
         status, summary = "ok", ""
         sites_before = glob_before = None
+        deferred_bw = None
         try:
             sites_before = read_bw_sites()
             glob_before = read_global_whitelist()
@@ -2146,10 +2194,8 @@ def register(app, get_conn, nb_base, nb_token, docker_client, backup_sync_lookup
             st = bw_apply_start(docker_client, joblog)
             if st["warned"]:
                 raise DomainError("BunkerWeb hat Settings verworfen (siehe Warnungen)")
-            joblog("Schritt 2/2 [Pruefung] Reload abschliessen")
-            res = bw_apply_finish(docker_client, joblog, st)
-            if res["warnings"]:
-                raise DomainError("BunkerWeb hat Settings verworfen (siehe Warnungen)")
+            joblog("Schritt 2/2 [Pruefung] Geschriebenen Stand pruefen")
+            deferred_bw = st
             live, _ = bw_whitelist_live()
             if _wl_norm(live) != _wl_norm(entries):
                 raise DomainError("Geschriebener Stand weicht vom Entwurf ab")
@@ -2159,6 +2205,7 @@ def register(app, get_conn, nb_base, nb_token, docker_client, backup_sync_lookup
             log.exception("whitelist-job %s", job_id)
             joblog(f"FEHLER: {e}")
             status, summary = "error", f"Abgebrochen: {e}"
+            deferred_bw = None
             if sites_before is not None:
                 try:
                     joblog("Alten Stand wiederherstellen ...")
@@ -2171,7 +2218,11 @@ def register(app, get_conn, nb_base, nb_token, docker_client, backup_sync_lookup
         finally:
             joblog(f"Fertig: {summary}")
             _job_update(job_id, status=status, summary=summary, finished_at=_now_iso(), log="\n".join(lines))
-            job_lock.release()
+            try:
+                if deferred_bw is not None and status == "ok":
+                    _finish_second_reload(job_id, deferred_bw, lines, summary)
+            finally:
+                job_lock.release()
 
     @bp.route("/api/bunkerweb/whitelist/apply", methods=["POST"])
     def api_bw_whitelist_apply():
@@ -2182,7 +2233,7 @@ def register(app, get_conn, nb_base, nb_token, docker_client, backup_sync_lookup
         if entries is None:
             return jsonify(error="Keine offenen Aenderungen"), 400
         if not job_lock.acquire(blocking=False):
-            return jsonify(error="Es laeuft bereits eine BunkerWeb-Aenderung - bitte warten"), 409
+            return jsonify(error=_busy_error()), 409
         try:
             pub = {"domain": "BunkerWeb-Whitelist", "action": "whitelist",
                    "steps": [{"kind": "bw_whitelist", "system": "BunkerWeb", "text": "Whitelist schreiben, bw-scheduler neu laden"}]}
@@ -2284,7 +2335,7 @@ def register(app, get_conn, nb_base, nb_token, docker_client, backup_sync_lookup
         if not plan["steps"]:
             return jsonify(error="Keine Aenderungen"), 400
         if not job_lock.acquire(blocking=False):
-            return jsonify(error="Es laeuft bereits eine Aenderung - bitte warten"), 409
+            return jsonify(error=_busy_error()), 409
         try:
             c = get_conn()
             cur = c.execute(
@@ -2342,7 +2393,7 @@ def register(app, get_conn, nb_base, nb_token, docker_client, backup_sync_lookup
             return jsonify(error="Der Zustand hat sich seit der Vorschau geaendert - bitte Vorschau neu laden."), 409
         job_id = start_bulk_job(pub, plans, pending=False)
         if job_id is None:
-            return jsonify(error="Es laeuft bereits eine Aenderung - bitte warten"), 409
+            return jsonify(error=_busy_error()), 409
         return jsonify(job_id=job_id)
 
     def _has_secret(spec):
@@ -2427,7 +2478,7 @@ def register(app, get_conn, nb_base, nb_token, docker_client, backup_sync_lookup
             return jsonify(error="Der Zustand hat sich seit der Vorschau geaendert - bitte Vorschau neu laden."), 409
         job_id = start_bulk_job(pub, plans, pending=True)
         if job_id is None:
-            return jsonify(error="Es laeuft bereits eine Aenderung - bitte warten"), 409
+            return jsonify(error=_busy_error()), 409
         return jsonify(job_id=job_id)
 
     app.register_blueprint(bp)
